@@ -4,6 +4,7 @@ import statistics
 import os
 import uuid
 import sys
+import shutil
 
 PYTHON_VERSIONS = ["3.10", "3.11", "3.12"]
 
@@ -14,24 +15,23 @@ EXTRAS = ["pyrit", None]
 NUM_RUNS_PER_SCENARIO = 3
 
 
-def create_conda_env(python_version, env_name):
+def create_uv_venv(python_version, env_name):
     cmd = [
-        "conda", "create", "-y",
-        "-n", env_name,
-        f"python={python_version}"
+        "uv", "venv", 
+        "-n", "-p", python_version, env_name,
     ]
 
-    
     subprocess.run(cmd, check=True)
 
-def remove_conda_env(env_name):
-    cmd = ["conda", "remove", "-y", "--all", "-n", env_name]
-    print("Removing conda environment:", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+def remove_venv(env_name):
+    # cmd = ["Remove-Item", env_name, "-Recurse", "-Force"]
+    print("Removing uv venv:", " ".join(env_name))
+    # subprocess.run(cmd, check=True)
+    shutil.rmtree(env_name)
 
-def time_pip_install_in_conda_env(env_name, install_target):
+def time_pip_install_in_uv_venv(install_target):
     start = time.perf_counter()
-    cmd = ["conda", "run", "-n", env_name, "pip", "install", install_target, "--no-cache-dir"]
+    cmd = ["uv", "pip", "install", install_target, "-n"]
     print("Running install:", " ".join(cmd))
     subprocess.run(cmd, check=True)
     end = time.perf_counter()
@@ -54,18 +54,19 @@ if __name__ == "__main__":
                 env_name = f"temp_env_py{py_ver.replace('.', '')}_{extras}_{uuid.uuid4().hex[:8]}"
 
                 try:
-                    print(f"\n=== Creating conda env for Python {py_ver} (extras={extras}) run {run_idx+1} ===")
-                    create_conda_env(py_ver, env_name)
+                    print(f"\n=== Creating uv venv for Python {py_ver} (extras={extras}) run {run_idx+1} ===")
+                    create_uv_venv(py_ver, env_name)
+                    os.environ["VIRTUAL_ENV"]=env_name
 
                     target = make_install_target(LOCAL_PACKAGE_PATH, extras)
-                    elapsed = time_pip_install_in_conda_env(env_name, target)
+                    elapsed = time_pip_install_in_uv_venv(target)
 
                     print(f"    => Installation took {elapsed:.2f} seconds.")
                     install_times.append(elapsed)
 
                 finally:
-                    print(f"Removing conda env {env_name}...")
-                    remove_conda_env(env_name)
+                    print(f"Removing uv venv {env_name}...")
+                    remove_venv(env_name)
 
             avg_time = statistics.mean(install_times)
             std_dev = statistics.pstdev(install_times) if len(install_times) > 1 else 0.0
