@@ -767,7 +767,6 @@ class RedTeamAgent():
                     formatted_response = {
                         "content": response,
                         "role": "assistant",
-                        "context":{},
                     }
                     messages_list.append(formatted_response) # type: ignore
                     return {"messages": messages_list, "stream": stream, "session_state": session_state, "context": {}}
@@ -1127,7 +1126,6 @@ class RedTeamAgent():
         output_path: Optional[Union[str, os.PathLike]] = None,
         risk_category: Optional[Any] = None
     ) -> RedTeamAgentResult:
-        # ...existing code...
         
         # Generate a unique filename based on risk category, strategy, and timestamp
         if output_path:
@@ -1149,7 +1147,6 @@ class RedTeamAgent():
             else:
                 output_path = str(base_dir / unique_filename)
         
-        # ...existing code...
         
         orchestrator = await call_orchestrator(self.chat_target, all_prompts, converter)
         data_path = self._write_pyrit_outputs_to_file(orchestrator, converter, risk_category)
