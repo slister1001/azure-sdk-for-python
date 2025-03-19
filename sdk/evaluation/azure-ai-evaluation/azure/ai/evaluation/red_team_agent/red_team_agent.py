@@ -36,12 +36,13 @@ from azure.ai.evaluation._common.math import list_mean_nan_safe
 from azure.ai.evaluation._common.utils import validate_azure_ai_project
 from azure.ai.evaluation._evaluators._content_safety import ViolenceEvaluator, HateUnfairnessEvaluator, SexualEvaluator, SelfHarmEvaluator
 from azure.ai.evaluation import evaluate
+from azure.ai.evaluation.simulator._utils import JsonLineList
 
 # Azure Core imports
 from azure.core.credentials import TokenCredential
 
 # Redteaming imports
-from .red_team_agent_result import RedTeamAgentResult, RedTeamingScorecard, RedTeamingParameters, Conversation
+from .red_team_agent_result import RedTeamAgentResult, RedTeamingScorecard, RedTeamingParameters, Conversation, RedTeamAgentOutput
 from .callback_chat_target import CallbackChatTarget
 from .utils.mock_attack_objective import MockAttackObjective
 from .utils.mock_evaluate import mock_evaluate
@@ -197,8 +198,9 @@ class RedTeamAgent():
 
     async def _log_redteam_results_to_mlflow(
         self,
-        redteam_result: RedTeamAgentResult,
-        eval_run: EvalRun
+        redteam_output: RedTeamAgentOutput,
+        eval_run: EvalRun,
+        data_only: bool = False,
     ) -> Optional[str]:
         """Log the Red Team Agent results to MLFlow.
         
@@ -211,12 +213,15 @@ class RedTeamAgent():
         :return: The URL to the run in Azure AI Studio, if available
         :rtype: Optional[str]
         """
-        artifact_name = "instance_results.json"
+        artifact_name = "instance_results.json" if not data_only else "instance_data.jsonl"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             artifact_file = Path(tmpdir) / artifact_name
             with open(artifact_file, "w", encoding=DefaultOpenEncoding.WRITE) as f:
-                json.dump(redteam_result, f)
+                if data_only:
+                    f.write(redteam_output.get_data())
+                elif redteam_output.red_team_agent_result:
+                    json.dump(redteam_output.red_team_agent_result, f)
             eval_run.log_artifact(tmpdir, artifact_name)
 
         eval_run.write_properties_to_run_history({
@@ -226,15 +231,16 @@ class RedTeamAgent():
             "_azureml.evaluate_artifacts": json.dumps([{"path": artifact_name, "type": "table"}]),
         })
 
-        scorecard = redteam_result["redteaming_scorecard"]
-        joint_attack_summary =  scorecard["joint_risk_attack_summary"]
-        
-        if joint_attack_summary:
-            for risk_category_summary in joint_attack_summary:
-                risk_category = risk_category_summary.get("risk_category").lower()
-                for key, value in risk_category_summary.items():
-                    if key != "risk_category":
-                        eval_run.log_metric(f"{risk_category}_{key}", cast(float, value))
+        if redteam_output.red_team_agent_result:
+            scorecard = redteam_output.red_team_agent_result["redteaming_scorecard"]
+            joint_attack_summary =  scorecard["joint_risk_attack_summary"]
+            
+            if joint_attack_summary:
+                for risk_category_summary in joint_attack_summary:
+                    risk_category = risk_category_summary.get("risk_category").lower()
+                    for key, value in risk_category_summary.items():
+                        if key != "risk_category":
+                            eval_run.log_metric(f"{risk_category}_{key}", cast(float, value))
 
     def _strategy_converter_map(self):
         return{
@@ -786,6 +792,7 @@ class RedTeamAgent():
         else:
             call_to_orchestrators.extend([self._prompt_sending_orchestrator])
         return call_to_orchestrators
+    
     def _to_conversation(self, results: Dict[str, List[str]]) -> List[Conversation]:
         """Convert evaluation results to a list of Conversation objects.
         
@@ -1173,7 +1180,7 @@ class RedTeamAgent():
             data_only: bool = False, 
             output_path: Optional[Union[str, os.PathLike]] = None,
             attack_objective_generator: Optional[AttackObjectiveGenerator] = None,
-            application_scenario: Optional[str] = None) -> Union[RedTeamAgentResult, Dict[str, Union[str, os.PathLike]]]:
+            application_scenario: Optional[str] = None) -> RedTeamAgentOutput:
         
         self.logger.info("=" * 80)
         self.logger.info(f"STARTING RED TEAM ATTACK with evaluation_name: {evaluation_name}")
@@ -1284,21 +1291,46 @@ class RedTeamAgent():
                         strategy=strategy_name,
                         reuse_objective_ids=reuse_ids
                     )
-                    self.logger.info(f"Got {len(attack_objectives)} objectives for strategy {strategy_name} and risk category {risk_cat_value}")
+                    self.logger.info(f"Got {len(risk_category_strategy_objectives[strategy_name])} objectives for strategy {strategy_name} and risk category {risk_category.value}")
+                
+                # Use the baseline's objectives as the default list for this risk category
+                baseline_key = AttackStrategy.Baseline.value
+                all_prompts_list = list(risk_category_strategy_objectives[baseline_key]) if baseline_key in risk_category_strategy_objectives else []
+                self.logger.info(f"Using baseline list with {len(all_prompts_list)} prompts as default for {risk_category.value}")
+                
+                risk_tasks = []
+                
+                # Create a matrix of all combinations of orchestrators and converters for this risk category
+                combinations = list(itertools.product(orchestrators, converters))
+                self.logger.info(f"For {risk_category.value}, running {len(combinations)} combinations of orchestrators and converters")
+                
+                for combo_idx, (call_orchestrator, converter) in enumerate(combinations):
+                    # Log which combination we're processing
+                    self.logger.info(f"[{risk_category.value}][{combo_idx+1}/{len(combinations)}] Processing orchestrator + converter combination")
                     
-                    # If this is baseline, store the objective IDs for later strategies
-                    if is_baseline:
-                        # Get the correct cache key format
-                        baseline_cache_key = (risk_cat_value, strategy_name.lower())
+                    # Determine which prompt list to use based on converter
+                    prompts_to_use = all_prompts_list
+                    converter_name = "Baseline"  # Default name
+                    
+                    if converter:
+                        if isinstance(converter, list):
+                            converter_name = "_".join([c.get_identifier()["__type__"] for c in converter if c])
+                            self.logger.info(f"Using composed converter: {converter_name}")
+                        else:
+                            converter_name = converter.get_identifier()["__type__"] if converter else None
+                            self.logger.info(f"Using converter: {converter_name}")
                         
-                        if baseline_cache_key in self.attack_objectives:
-                            objective_ids = self.attack_objectives[baseline_cache_key].get("objective_ids", [])
-                            if objective_ids:
-                                # Store baseline objective IDs for reuse in other strategies
-                                objective_ids_by_risk_category[risk_cat_value] = objective_ids
-                                self.logger.info(f"Stored {len(objective_ids)} objective IDs from baseline for {risk_cat_value}: {objective_ids}")
-                            else:
-                                self.logger.warning(f"No objective IDs found in baseline cache for {risk_cat_value}")
+                        # For converters like tense, use the strategy objectives for tense instead of the converter
+                        if converter_name == "TenseConverter":
+                            self.logger.info("TenseConverter detected, using Tense strategy objectives")
+                            converter = None
+                            prompts_to_use = risk_category_strategy_objectives.get(AttackStrategy.Tense.value, all_prompts_list)
+                            self.logger.info(f"Using {len(prompts_to_use)} prompts for Tense strategy")
+                        elif converter_name == "JailbreakConverter":
+                            self.logger.info("JailbreakConverter detected, using Jailbreak strategy objectives")
+                            converter = None
+                            prompts_to_use = risk_category_strategy_objectives.get(AttackStrategy.Jailbreak.value, all_prompts_list)
+                            self.logger.info(f"Using {len(prompts_to_use)} prompts for Jailbreak strategy")
                         else:
                             self.logger.warning(f"Baseline cache key {baseline_cache_key} not found in attack_objectives cache")
                             # List available cache keys for debugging
@@ -1351,28 +1383,38 @@ class RedTeamAgent():
             for d in all_results:
                 merged_results.update(d)
             self.logger.info(f"Merged results contain {len(merged_results)} entries")
-            if data_only: 
-                self.logger.info("Data-only mode, returning merged results without evaluation")
-                return merged_results
             
-            # Convert results to RedTeamAgentResult format
-            self.logger.info("Converting results to RedTeamAgentResult format")
-            red_team_agent_result = self._to_red_team_agent_result(cast(Dict[str, EvaluationResult], merged_results))
+            red_team_agent_result = None
+            if data_only: 
+                output =  RedTeamAgentOutput(redteaming_data=self._to_conversation(merged_results))
+            else:
+                self.logger.info("Converting results to RedTeamAgentResult format")
+                red_team_agent_result = self._to_red_team_agent_result(cast(Dict[str, EvaluationResult], merged_results))
+                output = RedTeamAgentOutput(
+                    red_team_agent_result=red_team_agent_result, 
+                    redteaming_data=red_team_agent_result["redteaming_data"]
+                )
             
             # Log results to MLFlow
             self.logger.info("Logging results to MLFlow")
             await self._log_redteam_results_to_mlflow(
-                redteam_result=red_team_agent_result,
+                redteam_output=output,
                 eval_run=eval_run,
+                data_only=data_only
             )
+        
+        if data_only: 
+            self.logger.info("Data-only mode, returning results without evaluation")
+            return output
         
         if output_path:
             self.logger.info(f"Writing output to {output_path}")
             _write_output(output_path, red_team_agent_result)
-            
-        self.logger.info("Generating scorecard")
-        scorecard = self._to_scorecard(red_team_agent_result)
-        print(scorecard)
+        
+        if red_team_agent_result:
+            self.logger.info("Generating scorecard")
+            scorecard = self._to_scorecard(red_team_agent_result)
+            print(scorecard)
         
         self.logger.info("Attack completed successfully")
-        return red_team_agent_result
+        return output
