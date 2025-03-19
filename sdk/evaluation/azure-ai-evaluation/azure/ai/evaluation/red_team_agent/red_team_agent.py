@@ -7,7 +7,7 @@ import os
 import logging
 import tempfile
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Union, cast
+from typing import Callable, Dict, List, Optional, Union, cast, Any
 import json
 from pathlib import Path
 import itertools
@@ -267,6 +267,11 @@ class RedTeamAgent():
     }
 
     def _risk_evaluator_map(self):
+        """Return a mapping of risk category names to evaluator classes.
+        
+        :return: Dictionary mapping risk category names to evaluator classes
+        :rtype: Dict[str, Type]
+        """
         return {
             'Violence': ViolenceEvaluator,
             'Hate_unfairness': HateUnfairnessEvaluator,
@@ -274,12 +279,143 @@ class RedTeamAgent():
             'Self_harm': SelfHarmEvaluator
         }
     
+    def _get_normalized_risk_category_name(self, risk_category: Optional[RiskCategory]) -> str:
+        """Get a normalized name for a risk category that can be used for file names and evaluator mapping.
+        
+        :param risk_category: The risk category to normalize
+        :type risk_category: Optional[RiskCategory]
+        :return: Normalized risk category name
+        :rtype: str
+        """
+        if not risk_category:
+            return "unknown"
+            
+        # Convert risk category to normalized form for consistent mapping
+        risk_value = risk_category.value
+        
+        # Map risk category values to their normalized forms used in evaluators
+        risk_mapping = {
+            'violence': 'Violence',
+            'sexual': 'Sexual',
+            'self_harm': 'Self_harm',
+            'hate_unfairness': 'Hate_unfairness'
+        }
+        
+        # Return normalized form or original if not found
+        return risk_mapping.get(risk_value.lower(), risk_value)
+    
+    async def _evaluate(
+        self,
+        data_path: Union[str, os.PathLike],
+        evaluation_name: Optional[str] = None,
+        data_only: bool = False,
+        output_path: Optional[Union[str, os.PathLike]] = None,
+        risk_category: Optional[RiskCategory] = None
+    ) -> Union[Dict[str, EvaluationResult], Dict[str, List[str]]]:
+        """Call the evaluate method if not data_only.
+        
+        :param evaluation_name: Optional name for the evaluation.
+        :type evaluation_name: Optional[str]
+        :param data_only: Whether to return only data paths instead of evaluation results.
+        :type data_only: bool
+        :param data_path: Path to the input data.
+        :type data_path: Optional[Union[str, os.PathLike]]
+        :param output_path: Path for output results.
+        :type output_path: Optional[Union[str, os.PathLike]]
+        :param risk_category: Optional risk category being evaluated
+        :type risk_category: Optional[RiskCategory]
+        :return: Evaluation results or data paths.
+        :rtype: Union[Dict[str, EvaluationResult], Dict[str, List[str]]]
+        """
+        self.logger.info(f"Evaluate called with data_path={data_path}, output_path={output_path}")
+        
+        # Extract converter name and risk category from file path
+        file_stem = Path(data_path).stem
+        parts = file_stem.split("_")
+        orchestrator_name = parts[0]
+        
+        # Converter name is the second part
+        converter_name = parts[1]
+        
+        # Risk category name might be the third part if it exists
+        file_risk_category = parts[2] if len(parts) > 2 else None
+        
+        # Use the explicitly provided risk_category parameter if available, otherwise use from file
+        risk_category_name = self._get_normalized_risk_category_name(risk_category) if risk_category else file_risk_category
+        
+        self.logger.info(f"Processing data with risk_category: {risk_category_name}")
+        
+        # Create a key that includes both converter and risk category if available
+        key = f"{converter_name}_{risk_category_name}" if risk_category_name else converter_name
+        
+        # For data_only=True, return converter name and data
+        if data_only:
+            with Path(data_path).open("r") as f:
+                json_lines = f.readlines()
+            return {key: json_lines}
+        
+        # Get the risk-to-evaluator mapping
+        evaluator_map = self._risk_evaluator_map()
+        
+        # Create evaluator instances based on the specific risk category
+        # If we have a specific risk category, use only that evaluator
+        if risk_category_name and risk_category_name in evaluator_map:
+            self.logger.info(f"Using specific evaluator for {risk_category_name}")
+            evaluator_class = evaluator_map[risk_category_name]
+            evaluator_instance = evaluator_class(
+                azure_ai_project=self.azure_ai_project, 
+                credential=self.credential
+            )
+            
+            # Map each risk category name to its specific evaluator
+            evaluators_dict = {
+                risk_category_name.lower(): evaluator_instance
+            }
+            
+            self.logger.info(f"Created evaluator: {risk_category_name.lower()} -> {evaluator_class.__name__}")
+        else:
+            # If no specific risk category or unknown risk category, use all evaluators
+            self.logger.info("No specific risk category identified, using all evaluators")
+            evaluators_dict = {}
+            
+            # Create all evaluator instances
+            for risk_name, evaluator_class in evaluator_map.items():
+                evaluator_instance = evaluator_class(
+                    azure_ai_project=self.azure_ai_project,
+                    credential=self.credential
+                )
+                evaluators_dict[risk_name.lower()] = evaluator_instance
+                self.logger.info(f"Created evaluator: {risk_name.lower()} -> {evaluator_class.__name__}")
+        
+        # Generate output filename
+        if evaluation_name: 
+            output_prefix = evaluation_name + "_"
+        else: 
+            output_prefix = ""
+            
+        # Include risk category in output file name if available
+        risk_suffix = f"_{risk_category_name}" if risk_category_name else ""
+        output_file = f"{output_prefix}{orchestrator_name}{converter_name}{risk_suffix}{RESULTS_EXT}"
+        
+        self.logger.info(f"Running evaluation with {len(evaluators_dict)} evaluators")
+        self.logger.info(f"Evaluators: {list(evaluators_dict.keys())}")
+        
+        # Call evaluate with the specific evaluators
+        evaluate_outputs = evaluate(
+            data=data_path,
+            evaluators=evaluators_dict,
+            output_path=output_path if output_path else output_file,
+        )
+        
+        return {key: evaluate_outputs}
+        
     async def _get_attack_objectives(
         self,
         attack_objective_generator,
-        risk_category: Optional[RiskCategory] = None,  # Now accepting a single risk category
+        risk_category: Optional[RiskCategory] = None,
         application_scenario: Optional[str] = None,
-        strategy: Optional[str] = None
+        strategy: Optional[str] = None,
+        reuse_objective_ids: Optional[List[str]] = None  # New parameter to pass objective IDs to reuse
     ) -> List[str]:
         """Get attack objectives from the RAI client for a specific risk category.
         
@@ -291,6 +427,8 @@ class RedTeamAgent():
         :type application_scenario: str
         :param strategy: Optional attack strategy to get specific objectives for
         :type strategy: str
+        :param reuse_objective_ids: Optional list of objective IDs to reuse across strategies for consistency
+        :type reuse_objective_ids: Optional[List[str]]
         :return: A list of attack objective prompts
         :rtype: List[str]
         """
@@ -302,30 +440,88 @@ class RedTeamAgent():
                 return []
         
         # Convert risk category to lowercase for consistent caching
-        risk_cat_value = risk_category.value.lower()
+        risk_cat_value = risk_category.value.lower() if risk_category else ""
         num_objectives = attack_objective_generator.num_objectives
+        strategy_name = strategy.lower() if strategy else ""
         
         self.logger.info("=" * 50)
-        self.logger.info(f"GET ATTACK OBJECTIVES: {risk_cat_value}, strategy: {strategy}")
+        self.logger.info(f"GET ATTACK OBJECTIVES: {risk_cat_value}, strategy: {strategy_name}")
         
-        # Create a cache key based on risk category and strategy
-        cache_key = ((risk_cat_value,), strategy)
+        # Create a cache key based on risk category and strategy (using lowercase for consistency)
+        cache_key = (risk_cat_value, strategy_name)
         
         # Check if we already have objectives for this risk category and strategy
         if cache_key in self.attack_objectives:
-            self.logger.info(f"Using cached objectives for {risk_cat_value} with strategy {strategy}")
+            self.logger.info(f"Using cached objectives for {risk_cat_value} with strategy {strategy_name}")
             cached_prompts = self.attack_objectives[cache_key].get("selected_prompts", [])
             self.logger.info(f"Retrieved {len(cached_prompts)} cached objectives")
             return cached_prompts
         
+        # If we're using non-baseline strategy and have specific objective IDs to reuse
+        if reuse_objective_ids and strategy_name and strategy_name != "baseline":
+            self.logger.info(f"Reusing objective IDs from baseline strategy for {strategy_name}")
+            
+            # Check if we've stored all objectives for this risk category (using lowercase baseline)
+            baseline_cache_key = (risk_cat_value, "baseline")
+            self.logger.info(f"Looking for baseline objectives with key: {baseline_cache_key}")
+            
+            if baseline_cache_key in self.attack_objectives:
+                baseline_data = self.attack_objectives[baseline_cache_key]
+                self.logger.info(f"Found baseline objectives in cache with {len(baseline_data.get('selected_prompts', []))} prompts")
+                
+                # Try to find the same objectives by ID in the stored baseline data
+                objectives_by_category = baseline_data.get("objectives_by_category", {})
+                uncategorized = baseline_data.get("uncategorized", [])
+                
+                # Combine all available objectives
+                all_objectives = []
+                if risk_cat_value in objectives_by_category:
+                    all_objectives.extend(objectives_by_category[risk_cat_value])
+                all_objectives.extend(uncategorized)
+                
+                # Find objectives with matching IDs
+                selected_objectives = []
+                found_ids = []
+                for obj_id in reuse_objective_ids:
+                    for obj in all_objectives:
+                        if obj.get("id") == obj_id:
+                            selected_objectives.append(obj)
+                            found_ids.append(obj_id)
+                            break
+                
+                self.logger.info(f"Matched {len(selected_objectives)}/{len(reuse_objective_ids)} objective IDs from baseline")
+                
+                # If we found all the requested objectives
+                if len(selected_objectives) == len(reuse_objective_ids):
+                    # Extract prompts from objectives
+                    selected_prompts = [obj["content"] for obj in selected_objectives]
+                    
+                    # Store in cache
+                    self.attack_objectives[cache_key] = {
+                        "objectives_by_category": objectives_by_category,
+                        "uncategorized": uncategorized,
+                        "strategy": strategy_name,
+                        "risk_category": risk_cat_value,
+                        "selected_prompts": selected_prompts,
+                        "objective_ids": reuse_objective_ids
+                    }
+                    
+                    self.logger.info(f"Successfully reused {len(selected_prompts)} objectives with IDs: {found_ids}")
+                    return selected_prompts
+                else:
+                    self.logger.warning(f"Could not find all objectives with IDs {reuse_objective_ids}. Found {len(selected_objectives)} of {len(reuse_objective_ids)}.")
+                    # Continue to fetch new objectives
+            else:
+                self.logger.warning(f"No baseline objectives found for {risk_cat_value} to reuse IDs from")
+        
         # Fetch objectives from RAI client for this specific risk category
         try:
-            self.logger.info(f"API call: get_attack_objectives({risk_cat_value}, app: {application_scenario}, strategy: {strategy})")
+            self.logger.info(f"API call: get_attack_objectives({risk_cat_value}, app: {application_scenario}, strategy: {strategy_name})")
             
             objectives_response = await self.generated_rai_client.get_attack_objectives(
-                risk_categories=[risk_cat_value],  # Now just passing a single category
+                risk_categories=[risk_cat_value],
                 application_scenario=application_scenario or "",
-                strategy=strategy
+                strategy=strategy_name
             )
             
             if isinstance(objectives_response, dict):
@@ -336,7 +532,7 @@ class RedTeamAgent():
             else:
                 self.logger.info(f"API returned response of type: {type(objectives_response)}")
                 
-            if strategy == "jailbreak":
+            if strategy_name == "jailbreak":
                 self.logger.info("Applying jailbreak prefixes to objectives")
                 jailbreak_prefixes = await self.generated_rai_client.get_jailbreak_prefixes()
                 for objective in objectives_response:
@@ -424,19 +620,21 @@ class RedTeamAgent():
         if len(selected_cat_objectives) < num_objectives:
             self.logger.warning(f"Only found {len(selected_cat_objectives)} objectives for {risk_cat_value}, fewer than requested {num_objectives}")
         
-        # Extract content from selected objectives
+        # Extract content from selected objectives and store objective IDs for reuse
         selected_prompts = [obj["content"] for obj in selected_cat_objectives]
+        objective_ids = [obj["id"] for obj in selected_cat_objectives]
         
-        # Store in cache
+        # Store in cache with lowercase strategy name for consistent lookup
         self.attack_objectives[cache_key] = {
             "objectives_by_category": objectives_by_category,
             "uncategorized": uncategorized_objectives,
-            "strategy": strategy,
+            "strategy": strategy_name,
             "risk_category": risk_cat_value,
-            "selected_prompts": selected_prompts
+            "selected_prompts": selected_prompts,
+            "objective_ids": objective_ids
         }
         
-        self.logger.info(f"Selected {len(selected_prompts)} objectives for {risk_cat_value}")
+        self.logger.info(f"Selected {len(selected_prompts)} objectives for {risk_cat_value} with IDs: {objective_ids}")
         
         return selected_prompts
 
@@ -916,110 +1114,55 @@ class RedTeamAgent():
         
         return "\n".join(output)
     
-    async def _evaluate(
+    async def _process_attack(
         self,
-        data_path: Union[str, os.PathLike],
+        target: Union[Callable, AzureOpenAIModelConfiguration, OpenAIModelConfiguration, PromptChatTarget],
+        call_orchestrator: Callable,
+        converter: Optional[Callable],
+        all_prompts: List[Dict[str, str]],
+        progress_bar: tqdm,
+        progress_bar_lock: asyncio.Lock,
         evaluation_name: Optional[str] = None,
         data_only: bool = False,
-        output_path: Optional[Union[str, os.PathLike]] = None
-    ) -> Union[Dict[str, EvaluationResult], Dict[str, List[str]]]:
-        """Call the evaluate method if not data_only.
-
-        :param evaluation_name: Optional name for the evaluation.
-        :type evaluation_name: Optional[str]
-        :param data_only: Whether to return only data paths instead of evaluation results.
-        :type data_only: bool
-        :param data_path: Path to the input data.
-        :type data_path: Optional[Union[str, os.PathLike]]
-        :param output_path: Path for output results.
-        :type output_path: Optional[Union[str, os.PathLike]]
-        :return: Evaluation results or data paths.
-        :rtype: Union[Dict[str, EvaluationResult], Dict[str, List[str]]]
-        """
-        self.logger.info(f"Evaluate called with data_path={data_path}, output_path={output_path}")
-
-        # Extract converter name and risk category from file path
-        file_stem = Path(data_path).stem
-        parts = file_stem.split("_")
-
-        orchestrator_name = parts[0]
+        output_path: Optional[Union[str, os.PathLike]] = None,
+        risk_category: Optional[Any] = None
+    ) -> RedTeamAgentResult:
+        # ...existing code...
         
-        # Converter name is the second part
-        converter_name = parts[1]
+        # Generate a unique filename based on risk category, strategy, and timestamp
+        if output_path:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            risk_cat_str = risk_category.value.lower() if risk_category else "unknown_risk"
+            
+            # Get strategy name from the converter or use default
+            strategy_name = "unknown_strategy"
+            if converter:
+                strategy_name = getattr(converter, "strategy_name", strategy_name)
+            
+            # Create unique filename with risk category, strategy and timestamp
+            base_dir = Path(output_path)
+            unique_filename = f"{evaluation_name or 'redteam_eval'}_{risk_cat_str}_{strategy_name}_{timestamp}"
+            
+            # Ensure unique path for each evaluation
+            if not data_only:
+                output_path = str(base_dir / f"{unique_filename}.json")
+            else:
+                output_path = str(base_dir / unique_filename)
         
-        # Risk category name might be the third part if it exists
-        risk_category_name = parts[2] if len(parts) > 2 else None
+        # ...existing code...
         
-        # Create a key that includes both converter and risk category if available
-        key = f"{converter_name}_{risk_category_name}" if risk_category_name else converter_name
-        
-        # For data_only=True, return converter name and data
-        if data_only:
-            with Path(data_path).open("r") as f:
-                json_lines = f.readlines()
-            return {key: json_lines}
-
-        # If a specific risk category is provided, only evaluate that one
-        if risk_category_name:
-            risk_to_evaluator = {risk_category_name: self._risk_evaluator_map()[risk_category_name]}
-        else:
-            risk_to_evaluator = self._risk_evaluator_map()
-        
-        evaluators_dict = {risk: risk_to_evaluator[risk](azure_ai_project=self.azure_ai_project, credential=self.credential) 
-                          for risk in risk_to_evaluator.keys()}
-
-        if evaluation_name: 
-            output_prefix = evaluation_name + "_"
-        else: 
-            output_prefix = ""
-
-        # Include risk category in output file name if available
-        risk_suffix = f"_{risk_category_name}" if risk_category_name else ""
-        output_file = f"{output_prefix}{orchestrator_name}{converter_name}{risk_suffix}{RESULTS_EXT}"
-
-        evaluate_outputs = evaluate(
-            data=data_path,
-            evaluators=evaluators_dict,
-            output_path=output_path if output_path else output_file,
-        )
-        
-        return {key: evaluate_outputs}
-
-    async def _process_attack(
-            self, 
-            target: Union[Callable, AzureOpenAIModelConfiguration, OpenAIModelConfiguration],
-            call_orchestrator: Callable, 
-            converter: Union[PromptConverter, List[PromptConverter]], 
-            all_prompts: List[str],
-            progress_bar: tqdm,
-            progress_bar_lock: asyncio.Lock,
-            evaluation_name: Optional[str] = None,
-            data_only: bool = False, 
-            output_path: Optional[Union[str, os.PathLike]] = None,
-            risk_category: Optional[RiskCategory] = None,
-        ) ->  Union[Dict[str, EvaluationResult], Dict[str, List[str]]]:
-        """Process an attack with the given orchestrator, converter, and prompts.
-        
-        :param target: The target model or function to attack
-        :param call_orchestrator: Function to call to create an orchestrator
-        :param converter: The converter to use for the attack
-        :param all_prompts: List of prompts to use for the attack
-        :param progress_bar: Progress bar to update
-        :param progress_bar_lock: Lock for the progress bar
-        :param evaluation_name: Optional name for the evaluation
-        :param data_only: Whether to return only data without evaluation
-        :param output_path: Optional path for output
-        :param risk_category: Optional specific risk category for this attack
-        :return: Dictionary of evaluation results or raw data
-        """
         orchestrator = await call_orchestrator(self.chat_target, all_prompts, converter)
         data_path = self._write_pyrit_outputs_to_file(orchestrator, converter, risk_category)
+        
+        # Pass the risk category to the evaluate method to use the appropriate evaluator
         eval_result = await self._evaluate(
             evaluation_name=evaluation_name,
             data_only=data_only,
             data_path=data_path,
             output_path=output_path,
+            risk_category=risk_category  # Pass the risk category
         )
+        
         async with progress_bar_lock:
             progress_bar.update(1)
         return eval_result
@@ -1040,12 +1183,12 @@ class RedTeamAgent():
         self.logger.info(f"Attack strategies: {attack_strategy}")
         self.logger.info(f"data_only: {data_only}, output_path: {output_path}")
         
+        # Get and set the chat target
         chat_target = self._get_chat_target(target)
         self.chat_target = chat_target
         self.application_scenario = application_scenario or ""
         
-        # Initialize a dictionary to track objectives by strategy
-        strategy_objectives = {}
+        # Validate the attack objective generator
         if not attack_objective_generator:
             raise EvaluationException(
                 message="Attack objective generator is required for red team agent.",
@@ -1058,12 +1201,19 @@ class RedTeamAgent():
         self.risk_categories = attack_objective_generator.risk_categories
         self.logger.info(f"Risk categories to process: {[rc.value for rc in self.risk_categories]}")
         
-        self.logger.info("Using AttackObjectiveGenerator to get attack objectives")
-        # prepend AttackStrategy.Baseline to the attack strategy list
-        if AttackStrategy.Baseline not in attack_strategy:
-            attack_strategy.insert(0, AttackStrategy.Baseline)
-            self.logger.info("Added Baseline to attack strategies")
-            
+        # Ensure Baseline is always the first strategy
+        attack_strategies = attack_strategy.copy()
+        if AttackStrategy.Baseline in attack_strategies:
+            # If Baseline exists, remove it first
+            attack_strategies.remove(AttackStrategy.Baseline)
+        
+        # Always put Baseline at the beginning
+        attack_strategies.insert(0, AttackStrategy.Baseline)
+        self.logger.info(f"Organized attack strategies with Baseline first: {attack_strategies}")
+        
+        # Track objective IDs by risk category to ensure consistency across strategies
+        objective_ids_by_risk_category = {}
+        
         with self._start_redteam_mlflow_run(self.azure_ai_project, evaluation_name) as eval_run:
             self.ai_studio_url = _get_ai_studio_url(trace_destination=self.trace_destination, evaluation_id=eval_run.info.run_id)
             print(f"Track your attacks in AI Foundry: {self.ai_studio_url}")
@@ -1071,15 +1221,14 @@ class RedTeamAgent():
             
             self.logger.info("=" * 80)
             self.logger.info(f"Setting up attack configuration")
-            converters = self._get_converters_for_attack_strategy(attack_strategy)
-            self.logger.info(f"Selected {len(converters)} converters for attack strategies")
             
-            orchestrators = self._get_orchestrators_for_attack_strategy(attack_strategy)
+            # Get orchestrators for attack strategies
+            orchestrators = self._get_orchestrators_for_attack_strategy(attack_strategies)
             self.logger.info(f"Selected {len(orchestrators)} orchestrators for attack strategies")
             
-            # Calculate total tasks: #risk_categories * #converters * #orchestrators
-            total_tasks = len(self.risk_categories) * len(converters) * len(orchestrators)
-            self.logger.info(f"Total tasks to run: {total_tasks} ({len(self.risk_categories)} risk categories × {len(converters)} converters × {len(orchestrators)} orchestrators)")
+            # Calculate total tasks: #risk_categories * #strategies
+            total_tasks = len(self.risk_categories) * len(attack_strategies)
+            self.logger.info(f"Total tasks to run: {total_tasks} ({len(self.risk_categories)} risk categories × {len(attack_strategies)} strategies)")
             
             progress_bar = tqdm(
                 total=total_tasks,
@@ -1090,86 +1239,94 @@ class RedTeamAgent():
             progress_bar_lock = asyncio.Lock()
             
             all_results = []
+            
             # Outer loop over risk categories
             self.logger.info("=" * 80)
             self.logger.info(f"STARTING RISK CATEGORY PROCESSING LOOP")
+            
             for risk_idx, risk_category in enumerate(self.risk_categories):
-                self.logger.info(f"[{risk_idx+1}/{len(self.risk_categories)}] Processing risk category: {risk_category.value}")
+                risk_cat_value = risk_category.value.lower()
+                self.logger.info(f"[{risk_idx+1}/{len(self.risk_categories)}] Processing risk category: {risk_cat_value}")
                 
-                # Process each strategy and get its objectives for this specific risk category
-                self.logger.info(f"Fetching attack objectives for each strategy for risk category: {risk_category.value}")
-                risk_category_strategy_objectives = {}
-                
-                for strategy in attack_strategy:
-                    strategy_name = None
+                # Initialize dictionary for this risk category if not exists
+                if risk_cat_value not in objective_ids_by_risk_category:
+                    objective_ids_by_risk_category[risk_cat_value] = []
                     
-                    # Handle Composed strategies
+                # Inner loop over attack strategies (Baseline is always first)
+                for strategy_idx, strategy in enumerate(attack_strategies):
+                    is_baseline = (strategy_idx == 0)  # First strategy is always Baseline
+                    
+                    self.logger.info(f"[{risk_cat_value}][{strategy_idx+1}/{len(attack_strategies)}] Processing attack strategy")
+                    
+                    # Determine strategy name for logging and caching
                     if isinstance(strategy, List):
                         strategy_name = "_".join([s.value for s in strategy])
-                        self.logger.info(f"Processing composed strategy: {strategy_name} for {risk_category.value}")
+                        self.logger.info(f"Processing composed strategy: {strategy_name} for {risk_cat_value}")
                     else:
                         strategy_name = strategy.value if hasattr(strategy, "value") else str(strategy)
-                        self.logger.info(f"Processing strategy: {strategy_name} for {risk_category.value}")
-                        
-                    # Fetch objectives for this strategy and risk category
-                    self.logger.info(f"Fetching objectives for strategy: {strategy_name} and risk category: {risk_category.value}")
-                    risk_category_strategy_objectives[strategy_name] = await self._get_attack_objectives(
+                        self.logger.info(f"Processing strategy: {strategy_name} for {risk_cat_value}")
+                    
+                    # Get the appropriate converter for this strategy
+                    strategy_converter_map = self._strategy_converter_map()
+                    converter = strategy_converter_map.get(strategy, None)
+                    self.logger.info(f"Using converter: {type(converter).__name__ if converter else 'None'} for strategy {strategy_name}")
+                    
+                    # For baseline strategy, get fresh objectives
+                    # For non-baseline strategies, reuse the objective IDs from baseline if available
+                    reuse_ids = None
+                    if not is_baseline and objective_ids_by_risk_category[risk_cat_value]:
+                        reuse_ids = objective_ids_by_risk_category[risk_cat_value]
+                        self.logger.info(f"Will reuse {len(reuse_ids)} objective IDs from baseline for {strategy_name}")
+                    
+                    # Get attack objectives for this risk category and strategy
+                    self.logger.info(f"Fetching objectives for strategy: {strategy_name} and risk category: {risk_cat_value}")
+                    attack_objectives = await self._get_attack_objectives(
                         attack_objective_generator=attack_objective_generator,
-                        risk_category=risk_category,  # Pass the specific risk category
+                        risk_category=risk_category,
                         application_scenario=application_scenario,
-                        strategy=strategy_name
+                        strategy=strategy_name,
+                        reuse_objective_ids=reuse_ids
                     )
-                    self.logger.info(f"Got {len(risk_category_strategy_objectives[strategy_name])} objectives for strategy {strategy_name} and risk category {risk_category.value}")
-                
-                # Use the baseline's objectives as the default list for this risk category
-                baseline_key = AttackStrategy.Baseline.value
-                all_prompts_list = list(risk_category_strategy_objectives[baseline_key]) if baseline_key in risk_category_strategy_objectives else []
-                self.logger.info(f"Using baseline list with {len(all_prompts_list)} prompts as default for {risk_category.value}")
-                
-                risk_tasks = []
-                
-                # Create a matrix of all combinations of orchestrators and converters for this risk category
-                combinations = list(itertools.product(orchestrators, converters))
-                self.logger.info(f"For {risk_category.value}, running {len(combinations)} combinations of orchestrators and converters")
-                
-                for combo_idx, (call_orchestrator, converter) in enumerate(combinations):
-                    # Log which combination we're processing
-                    self.logger.info(f"[{risk_category.value}][{combo_idx+1}/{len(combinations)}] Processing orchestrator + converter combination")
+                    self.logger.info(f"Got {len(attack_objectives)} objectives for strategy {strategy_name} and risk category {risk_cat_value}")
                     
-                    # Determine which prompt list to use based on converter
-                    prompts_to_use = all_prompts_list
-                    converter_name = "Baseline"  # Default name
-                    
-                    if converter:
-                        if isinstance(converter, list):
-                            converter_name = "_".join([c.get_identifier()["__type__"] for c in converter if c])
-                            self.logger.info(f"Using composed converter: {converter_name}")
-                        else:
-                            converter_name = converter.get_identifier()["__type__"] if converter else None
-                            self.logger.info(f"Using converter: {converter_name}")
+                    # If this is baseline, store the objective IDs for later strategies
+                    if is_baseline:
+                        # Get the correct cache key format
+                        baseline_cache_key = (risk_cat_value, strategy_name.lower())
                         
-                        # For converters like tense, use the strategy objectives for tense instead of the converter
-                        if converter_name == "TenseConverter":
-                            self.logger.info("TenseConverter detected, using Tense strategy objectives")
-                            converter = None
-                            prompts_to_use = risk_category_strategy_objectives.get(AttackStrategy.Tense.value, all_prompts_list)
-                            self.logger.info(f"Using {len(prompts_to_use)} prompts for Tense strategy")
-                        elif converter_name == "JailbreakConverter":
-                            self.logger.info("JailbreakConverter detected, using Jailbreak strategy objectives")
-                            converter = None
-                            prompts_to_use = risk_category_strategy_objectives.get(AttackStrategy.Jailbreak.value, all_prompts_list)
-                            self.logger.info(f"Using {len(prompts_to_use)} prompts for Jailbreak strategy")
+                        if baseline_cache_key in self.attack_objectives:
+                            objective_ids = self.attack_objectives[baseline_cache_key].get("objective_ids", [])
+                            if objective_ids:
+                                # Store baseline objective IDs for reuse in other strategies
+                                objective_ids_by_risk_category[risk_cat_value] = objective_ids
+                                self.logger.info(f"Stored {len(objective_ids)} objective IDs from baseline for {risk_cat_value}: {objective_ids}")
+                            else:
+                                self.logger.warning(f"No objective IDs found in baseline cache for {risk_cat_value}")
                         else:
-                            self.logger.info(f"Using {len(prompts_to_use)} default prompts for converter {converter_name}")
-                    else:
-                        self.logger.info(f"No converter specified, using {len(prompts_to_use)} baseline prompts")
+                            self.logger.warning(f"Baseline cache key {baseline_cache_key} not found in attack_objectives cache")
+                            # List available cache keys for debugging
+                            cache_keys = list(self.attack_objectives.keys())
+                            self.logger.info(f"Available cache keys: {cache_keys}")
                     
-                    risk_tasks.append(
-                        self._process_attack(
+                    # Skip if no objectives found
+                    if not attack_objectives:
+                        self.logger.warning(f"No attack objectives found for {risk_cat_value} with strategy {strategy_name}. Skipping.")
+                        async with progress_bar_lock:
+                            progress_bar.update(1)
+                        continue
+                    
+                    # Select orchestrator (using the first one as they're all the same in the current implementation)
+                    call_orchestrator = orchestrators[0]
+                    self.logger.info(f"Using orchestrator: {call_orchestrator.__name__} for strategy {strategy_name}")
+                    
+                    # Run the attack with this orchestrator, converter and prompts
+                    self.logger.info(f"Running attack for {risk_cat_value} with strategy {strategy_name}")
+                    try:
+                        attack_result = await self._process_attack(
                             target=target,
                             call_orchestrator=call_orchestrator,
                             converter=converter,
-                            all_prompts=prompts_to_use,
+                            all_prompts=attack_objectives,
                             progress_bar=progress_bar,
                             progress_bar_lock=progress_bar_lock,
                             evaluation_name=evaluation_name,
@@ -1177,35 +1334,31 @@ class RedTeamAgent():
                             output_path=output_path,
                             risk_category=risk_category
                         )
-                    )
+                        self.logger.info(f"Completed attack for {risk_cat_value} with strategy {strategy_name}")
+                        all_results.append(attack_result)
+                    except Exception as e:
+                        self.logger.error(f"Error running attack for {risk_cat_value} with strategy {strategy_name}: {str(e)}")
+                        # Update progress bar even if there's an error
+                        async with progress_bar_lock:
+                            progress_bar.update(1)
                 
-                # Process results for this risk category
-                self.logger.info(f"Gathering {len(risk_tasks)} tasks for risk category {risk_category.value}")
-                risk_results = await asyncio.gather(*risk_tasks)
-                self.logger.info(f"Received {len(risk_results)} results for risk category {risk_category.value}")
-                all_results.extend(risk_results)
-                
-                # TODO: Calculate per-risk category metrics here if needed
-                self.logger.info(f"Completed processing for risk category: {risk_category.value}")
+                self.logger.info(f"Completed processing for risk category: {risk_cat_value}")
                 
             progress_bar.close()
             
             # Merge all results across risk categories
             self.logger.info("=" * 80)
             self.logger.info(f"PROCESSING RESULTS")
-            self.logger.info(f"Merging {len(all_results)} results across all risk categories")
+            self.logger.info(f"Merging {len(all_results)} results across all risk categories and strategies")
             merged_results = {}
             for d in all_results:
                 merged_results.update(d)
             self.logger.info(f"Merged results contain {len(merged_results)} entries")
-
             if data_only: 
                 self.logger.info("Data-only mode, returning merged results without evaluation")
                 return merged_results
             
-            # TODO: Implement aggregation of metrics across risk categories
-            # TODO: Consider how to properly weight and combine metrics from different risk categories
-            
+            # Convert results to RedTeamAgentResult format
             self.logger.info("Converting results to RedTeamAgentResult format")
             red_team_agent_result = self._to_red_team_agent_result(cast(Dict[str, EvaluationResult], merged_results))
             
