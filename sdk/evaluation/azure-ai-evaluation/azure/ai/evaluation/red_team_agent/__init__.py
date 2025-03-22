@@ -6,6 +6,6 @@ from enum import Enum
 from typing import List
 from .red_team_agent import RedTeamAgent
 from .attack_strategy import AttackStrategy
-from .risk_category import RiskCategory
+from .attack_objective_generator import AttackObjectiveGenerator, RiskCategory
 
-__all__ = ["RedTeamAgent", "AttackStrategy", "RiskCategory"]
+__all__ = ["RedTeamAgent", "AttackStrategy", "RiskCategory", "AttackObjectiveGenerator"]
