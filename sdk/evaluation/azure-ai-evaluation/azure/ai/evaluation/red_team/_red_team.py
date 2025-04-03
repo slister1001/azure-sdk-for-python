@@ -1264,6 +1264,7 @@ class RedTeam():
                 data=data_path,
                 evaluators=evaluators_dict,
                 output_path=result_path,
+                _use_run_submitter_client=True
             )
             eval_logger.debug(f"Completed evaluation for {risk_category.value}/{strategy_name}")
             
