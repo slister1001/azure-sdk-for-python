@@ -811,24 +811,12 @@ class RedTeam:
                 self.logger.debug(
                     f"API call: get_attack_objectives({risk_cat_value}, app: {application_scenario}, strategy: {strategy})"
                 )
-                # strategy param specifies whether to get a strategy-specific dataset from the RAI service
-                # right now, only tense requires strategy-specific dataset
-                if "tense" in strategy:
-                    objectives_response = await self.generated_rai_client.get_attack_objectives(
-                        risk_type=content_harm_risk,
-                        risk_category=other_risk,
-                        application_scenario=application_scenario or "",
-                        strategy="tense",
-                        scan_session_id=self.scan_session_id,
-                    )
-                else:
-                    objectives_response = await self.generated_rai_client.get_attack_objectives(
-                        risk_type=content_harm_risk,
-                        risk_category=other_risk,
-                        application_scenario=application_scenario or "",
-                        strategy=None,
-                        scan_session_id=self.scan_session_id,
-                    )
+                objectives_response = await self.generated_rai_client.get_attack_objectives(
+                    risk_type=content_harm_risk,
+                    risk_category=other_risk,
+                    application_scenario=application_scenario or "",
+                    scan_session_id=self.scan_session_id,
+                )
                 if isinstance(objectives_response, list):
                     self.logger.debug(f"API returned {len(objectives_response)} objectives")
                 else:
@@ -1041,7 +1029,7 @@ class RedTeam:
 
     # Replace with utility function
     def _get_converter_for_strategy(
-        self, attack_strategy: Union[AttackStrategy, List[AttackStrategy]]
+        self, attack_strategy: Union[AttackStrategy, List[AttackStrategy]], generated_rai_client: GeneratedRAIClient, is_one_dp_project: bool, logger: logging.Logger
     ) -> Union[PromptConverter, List[PromptConverter]]:
         """Get the appropriate prompt converter(s) for a given attack strategy.
 
@@ -1051,12 +1039,15 @@ class RedTeam:
 
         :param attack_strategy: The attack strategy or strategies to get converters for
         :type attack_strategy: Union[AttackStrategy, List[AttackStrategy]]
+        :param generated_rai_client: The generated RAI client instance
+        :type generated_rai_client: GeneratedRAIClient
+        :param is_one_dp_project: Flag indicating if the project is a one data plane project
+        :type is_one_dp_project: bool
         :return: The prompt converter(s) for the specified strategy
         :rtype: Union[PromptConverter, List[PromptConverter]]
         """
         from ._utils.strategy_utils import get_converter_for_strategy
-
-        return get_converter_for_strategy(attack_strategy)
+        return get_converter_for_strategy(attack_strategy, generated_rai_client, is_one_dp_project, logger)
 
     async def _prompt_sending_orchestrator(
         self,
@@ -2904,7 +2895,7 @@ class RedTeam:
             tqdm.write(f"▶️ Starting task: {strategy_name} strategy for {risk_category.value} risk category")
             log_strategy_start(self.logger, strategy_name, risk_category.value)
 
-            converter = self._get_converter_for_strategy(strategy)
+            converter = self._get_converter_for_strategy(strategy, self.generated_rai_client, self._one_dp_project, self.logger)
             call_orchestrator = self._get_orchestrator_for_attack_strategy(strategy)
             try:
                 self.logger.debug(f"Calling orchestrator for {strategy_name} strategy")
@@ -3189,17 +3180,9 @@ class RedTeam:
                             "⚠️ Warning: Jailbreak strategy with custom attack objectives may not work as expected."
                         )
 
-                    if strategy == AttackStrategy.Tense:
-                        self.logger.warning(
-                            "Tense strategy requires specific formatting in objectives and may not work correctly with custom attack objectives."
-                        )
-                        tqdm.write(
-                            "⚠️ Warning: Tense strategy requires specific formatting in objectives and may not work correctly with custom attack objectives."
-                        )
-
                     # Check for redundant converters
                     # TODO: should this be in flattening logic?
-                    converter = self._get_converter_for_strategy(strategy)
+                    converter = self._get_converter_for_strategy(strategy, self.generated_rai_client, self._one_dp_project, self.logger)
                     if converter is not None:
                         converter_type = (
                             type(converter).__name__
