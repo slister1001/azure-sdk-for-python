@@ -37,6 +37,7 @@ class AttackStrategy(Enum):
     Jailbreak = "jailbreak"
     MultiTurn = "multi_turn"
     Crescendo = "crescendo"
+    TreeOfAttacksWithPruning = "tree_of_attacks_with_pruning"
 
     @classmethod
     def Compose(cls, items: List["AttackStrategy"]) -> List["AttackStrategy"]:

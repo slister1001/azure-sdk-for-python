@@ -13,18 +13,18 @@ from ._rai_service_eval_chat_target import RAIServiceEvalChatTarget
 from .._attack_objective_generator import RiskCategory
 
 
-class AzureRAIServiceTrueFalseScorer(Scorer):
-    """Scorer for Azure RAI service.
+class AzureRAIServiceScaleScorer(Scorer):
+    """Scorer for Azure RAI service that returns a scale score.
 
     This class extends the PyRIT Scorer class to support scoring prompts using
     the Azure RAI service. It sends prompts to the RAI service and processes
-    the responses to generate scores.
+    the responses to generate scores on a scale.
 
-    This is a true/false scorer that determines whether a given prompt response
-    achieves the specified objective.
+    This is a scale scorer that returns a float value between 0.0 and 1.0
+    indicating how well a given prompt response achieves the specified objective.
     """
 
-    scorer_type = "true_false"
+    scorer_type = "float_scale"
 
     def __init__(
         self,
@@ -38,14 +38,20 @@ class AzureRAIServiceTrueFalseScorer(Scorer):
         prompt_template_key: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
         context: Optional[str] = None,
+        evaluator_name: Optional[str] = None,
     ) -> None:
         """Initialize the scorer.
 
         :param client: The RAI client to use for scoring
+        :param risk_category: The risk category for scoring
+        :param credential: The credential for authentication
+        :param azure_ai_project: The Azure AI project configuration
         :param api_version: Optional API version to use
         :param model: Optional model name to score with
         :param prompt_template_key: Optional prompt template key to use
         :param logger: Optional logger to use
+        :param context: Optional context for scoring
+        :param evaluator_name: Optional evaluator name identifier
         """
         super().__init__()
         self._client = client
@@ -54,15 +60,17 @@ class AzureRAIServiceTrueFalseScorer(Scorer):
         self._prompt_template_key = prompt_template_key
         self.logger = logger
         self.context = context
+        self.evaluator_name = evaluator_name
 
-        # Use AzureRAIServiceTarget for scoring as well
+        # Use RAIServiceEvalChatTarget for scoring
         self._scoring_target_red_llm = RAIServiceEvalChatTarget(
             logger=self.logger,
             credential=credential,
             azure_ai_project=azure_ai_project,
             risk_category=risk_category,
             context=context,
-            scorer_type="true_false",
+            evaluator_name=evaluator_name,
+            scorer_type="float_scale",
         )
 
     async def score_async(
@@ -77,7 +85,7 @@ class AzureRAIServiceTrueFalseScorer(Scorer):
         :param task: Optional task description (objective)
         :return: List of Score objects
         """
-        self.logger.info(f"Starting to score prompt response")
+        self.logger.info(f"Starting to score prompt response with scale scorer")
 
         # Validate request_response
         self.validate(request_response, task=task)
@@ -87,7 +95,7 @@ class AzureRAIServiceTrueFalseScorer(Scorer):
 
         unvalidated_score: UnvalidatedScore = await self._score_value_with_llm(
             prompt_target=self._scoring_target_red_llm,
-            system_prompt="Please evaluate the following response.",  # TODO: What should this be?
+            system_prompt="Please evaluate the following response on a scale.",
             prompt_request_value=request_response.converted_value,
             prompt_request_data_type=request_response.converted_value_data_type,
             scored_prompt_id=request_response.id,
@@ -95,9 +103,11 @@ class AzureRAIServiceTrueFalseScorer(Scorer):
             orchestrator_identifier=request_response.orchestrator_identifier,
         )
 
+        # For scale scorer, we expect the raw_score_value to be a numeric score
+        # The RAI service should return a score between 0 and the threshold
+        # We need to normalize this to a 0.0-1.0 scale
         score = unvalidated_score.to_score(score_value=unvalidated_score.raw_score_value)
 
-        # self._memory.add_scores_to_memory(scores=[score])
         return [score]
 
     def validate(self, request_response, *, task: Optional[str] = None):
@@ -109,7 +119,5 @@ class AzureRAIServiceTrueFalseScorer(Scorer):
         :param task: The task based on which the text should be scored (the original attacker model's objective)
         :raises: ValueError if the request_response is invalid
         """
-
         # Additional validation can be added here as needed
-        # For now we'll keep it simple since we handle conversion to PromptRequestResponse in score_async
         pass

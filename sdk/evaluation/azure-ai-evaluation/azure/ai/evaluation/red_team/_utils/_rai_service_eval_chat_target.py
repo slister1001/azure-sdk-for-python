@@ -35,13 +35,23 @@ class RAIServiceEvalChatTarget(PromptChatTarget):
         logger: Optional[logging.Logger] = None,
         evaluator_name: Optional[str] = None,
         context: Optional[str] = None,
+        scorer_type: str = "true_false",
     ) -> None:
         """Initialize the RAIServiceEvalChatTarget.
 
-        :param endpoint: The endpoint URL for the RAI service.
-        :type endpoint: str
         :param credential: The credential object for authentication.
         :type credential: Any
+        :param azure_ai_project: The Azure AI project configuration.
+        :param risk_category: The risk category for evaluation.
+        :type risk_category: RiskCategory
+        :param logger: Optional logger for logging.
+        :type logger: Optional[logging.Logger]
+        :param evaluator_name: Optional evaluator name identifier.
+        :type evaluator_name: Optional[str]
+        :param context: Optional context for evaluation.
+        :type context: Optional[str]
+        :param scorer_type: Type of scorer this target is used for (true_false, float_scale).
+        :type scorer_type: str
         """
         super().__init__()
         self.logger = logger
@@ -50,6 +60,7 @@ class RAIServiceEvalChatTarget(PromptChatTarget):
         self.credential = credential
         self.azure_ai_project = azure_ai_project
         self.context = context
+        self.scorer_type = scorer_type
 
     async def send_prompt_async(
         self, *, prompt_request: PromptRequestResponse, objective: str = ""
@@ -83,19 +94,37 @@ class RAIServiceEvalChatTarget(PromptChatTarget):
         # Ensure we're working with numeric values for comparison
         boolean_result = float(score) > float(threshold)
 
-        # Format the response in a way that PyRIT's scorer can parse
-        # Use "true"/"false" string for score_value which is required for true_false score type
-        scorer_compatible_response = {
-            "score_value": boolean_result,  # PyRIT requires lowercase "true" or "false" for true_false scores
-            "description": f"Threshold: {threshold}, Result: {result}",
-            "rationale": reason,
-            "metadata": {
-                "raw_score": score,
-                "threshold": threshold,
-                "result": result,
-                "risk_category": self.risk_category,
-            },
-        }
+        # Format the response based on scorer type
+        if self.scorer_type == "float_scale":
+            # For float scale scorers, return normalized score (0.0-1.0)
+            # Normalize the score based on threshold (assuming max score is threshold * 2)
+            max_possible_score = float(threshold) * 2
+            normalized_score = min(float(score) / max_possible_score, 1.0)
+
+            scorer_compatible_response = {
+                "score_value": normalized_score,
+                "description": f"Threshold: {threshold}, Result: {result}",
+                "rationale": reason,
+                "metadata": {
+                    "raw_score": score,
+                    "threshold": threshold,
+                    "result": result,
+                    "risk_category": self.risk_category,
+                },
+            }
+        else:
+            # Default true/false scorer format
+            scorer_compatible_response = {
+                "score_value": boolean_result,  # PyRIT requires lowercase "true" or "false" for true_false scores
+                "description": f"Threshold: {threshold}, Result: {result}",
+                "rationale": reason,
+                "metadata": {
+                    "raw_score": score,
+                    "threshold": threshold,
+                    "result": result,
+                    "risk_category": self.risk_category,
+                },
+            }
 
         # Convert to JSON string
         response_json = json.dumps(scorer_compatible_response)

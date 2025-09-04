@@ -938,11 +938,14 @@ class RedTeam:
         if len(flattened_attack_strategies) > 2 and (
             AttackStrategy.MultiTurn in flattened_attack_strategies
             or AttackStrategy.Crescendo in flattened_attack_strategies
+            or AttackStrategy.TreeOfAttacksWithPruning in flattened_attack_strategies
         ):
             self.logger.warning(
-                "MultiTurn and Crescendo strategies are not compatible with multiple attack strategies."
+                "MultiTurn, Crescendo, and TreeOfAttacksWithPruning strategies are not compatible with multiple attack strategies."
             )
-            raise ValueError("MultiTurn and Crescendo strategies are not compatible with multiple attack strategies.")
+            raise ValueError(
+                "MultiTurn, Crescendo, and TreeOfAttacksWithPruning strategies are not compatible with multiple attack strategies."
+            )
         if AttackStrategy.Tense in flattened_attack_strategies and (
             RiskCategory.IndirectAttack in self.risk_categories
             or RiskCategory.UngroundedAttributes in self.risk_categories

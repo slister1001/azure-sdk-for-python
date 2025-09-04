@@ -41,6 +41,7 @@ ATTACK_STRATEGY_COMPLEXITY_MAP = {
     str(AttackStrategy.Jailbreak.value): "easy",
     str(AttackStrategy.MultiTurn.value): "difficult",
     str(AttackStrategy.Crescendo.value): "difficult",
+    str(AttackStrategy.TreeOfAttacksWithPruning.value): "difficult",
 }
 
 # Task timeouts and status codes
