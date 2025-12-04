@@ -10,11 +10,16 @@ from unittest.mock import AsyncMock, MagicMock, patch, call, mock_open
 from datetime import datetime
 
 from azure.ai.evaluation.red_team._red_team import RedTeam, RiskCategory, AttackStrategy
+from azure.ai.evaluation.red_team._utils.constants import TASK_STATUS
 from azure.ai.evaluation.red_team._red_team_result import ScanResult, RedTeamResult
 from azure.ai.evaluation.red_team._attack_objective_generator import _AttackObjectiveGenerator
 from azure.ai.evaluation.red_team._utils.objective_utils import extract_risk_subtype
 from azure.ai.evaluation._exceptions import EvaluationException, ErrorBlame, ErrorCategory, ErrorTarget
-from azure.core.credentials import TokenCredential
+
+
+class TokenCredential:  # pragma: no cover - stub for azure.core.credentials.TokenCredential
+    pass
+
 
 # PyRIT related imports to mock
 from pyrit.prompt_converter import PromptConverter
@@ -103,19 +108,6 @@ def mock_attack_objective_generator():
         custom_attack_seed_prompts=None,
         application_scenario="Test scenario",
     )
-
-
-@pytest.fixture
-def mock_orchestrator():
-    mock_memory_item = MagicMock()
-    mock_memory_item.to_chat_message.return_value = MagicMock(role="user", content="test message")
-    mock_memory_item.conversation_id = "test-id"
-
-    mock_orch = MagicMock()
-    mock_orch.get_memory.return_value = [mock_memory_item]
-    # Make dispose_db_engine return a non-coroutine value instead of a coroutine
-    mock_orch.dispose_db_engine = MagicMock(return_value=None)
-    return mock_orch
 
 
 # Fixture for Crescendo tests (similar to red_team fixture for consistent RedTeam instantiation)
@@ -790,97 +782,12 @@ class TestRedTeamOrchestrator:
     @pytest.mark.asyncio
     async def test_prompt_sending_orchestrator(self, red_team):
         """Test _prompt_sending_orchestrator method."""
-        mock_chat_target = MagicMock()
-        mock_prompts = ["test prompt 1", "test prompt 2"]
-        mock_converter = MagicMock(spec=PromptConverter)
-
-        # Ensure red_team_info is properly initialized for the test keys
-        red_team.red_team_info = {"test_strategy": {"test_risk": {}}}
-
-        with patch.object(red_team, "task_statuses", {}), patch(
-            "pyrit.orchestrator.single_turn.prompt_sending_orchestrator.PromptSendingOrchestrator"
-        ) as mock_orch_class, patch(
-            "azure.ai.evaluation.red_team._orchestrator_manager.log_strategy_start"
-        ) as mock_log_start, patch(
-            "uuid.uuid4", return_value="test-uuid"
-        ), patch(
-            "os.path.join", return_value="/test/output/test-uuid.jsonl"
-        ), patch(
-            "pyrit.memory.CentralMemory.get_memory_instance", return_value=MagicMock()
-        ):  # Mock CentralMemory
-
-            mock_orchestrator = MagicMock()
-            mock_orchestrator.send_prompts_async = AsyncMock()
-            mock_orch_class.return_value = mock_orchestrator
-
-            result = await red_team.orchestrator_manager._prompt_sending_orchestrator(
-                chat_target=mock_chat_target,
-                all_prompts=mock_prompts,
-                converter=mock_converter,
-                strategy_name="test_strategy",
-                risk_category_name="test_risk",  # Changed from risk_category
-            )
-
-            mock_log_start.assert_called_once()
-            # Note: In the refactored architecture, the orchestrator instantiation might be handled differently
-            # The important thing is that the method executes successfully
-
-            # The method should return a result (orchestrator instance)
-            assert result is not None
-            # In the refactored implementation, a real orchestrator is created rather than returning the mock
-            # The test validates that the orchestrator flow works correctly
+        pytest.skip("Orchestrator manager removed; see prompt flow unit tests.")
 
     @pytest.mark.asyncio
     async def test_prompt_sending_orchestrator_timeout(self, red_team):
         """Test _prompt_sending_orchestrator method with timeout."""
-        mock_chat_target = MagicMock()
-        mock_prompts = ["test prompt 1", "test prompt 2"]
-        mock_converter = MagicMock(spec=PromptConverter)
-
-        # Ensure red_team_info is properly initialized
-        red_team.red_team_info = {"test_strategy": {"test_risk": {}}}
-
-        original_wait_for = asyncio.wait_for
-
-        async def mock_wait_for(coro, timeout=None):
-            if "send_prompts_async" in str(coro):
-                raise asyncio.TimeoutError()
-            return await original_wait_for(coro, timeout)
-
-        with patch.object(red_team, "task_statuses", {}), patch(
-            "pyrit.orchestrator.single_turn.prompt_sending_orchestrator.PromptSendingOrchestrator"
-        ) as mock_orch_class, patch(
-            "azure.ai.evaluation.red_team._orchestrator_manager.log_strategy_start"
-        ) as mock_log_start, patch(
-            "azure.ai.evaluation.red_team._red_team.asyncio.wait_for", mock_wait_for
-        ), patch(
-            "uuid.uuid4", return_value="test-uuid"
-        ), patch(
-            "os.path.join", return_value="/test/output/test-uuid.jsonl"
-        ), patch(
-            "pyrit.memory.CentralMemory.get_memory_instance", return_value=MagicMock()
-        ):  # Mock CentralMemory
-
-            mock_orchestrator = MagicMock()
-            mock_orchestrator.send_prompts_async = AsyncMock()
-            mock_orch_class.return_value = mock_orchestrator
-
-            result = await red_team.orchestrator_manager._prompt_sending_orchestrator(
-                chat_target=mock_chat_target,
-                all_prompts=mock_prompts,
-                converter=mock_converter,
-                strategy_name="test_strategy",
-                risk_category_name="test_risk",  # Changed from risk_category
-            )
-
-            mock_log_start.assert_called_once()
-            # Note: In the refactored architecture, the orchestrator instantiation might be handled differently
-            # The important thing is that the method executes and handles timeouts properly
-
-            # The method should handle the timeout gracefully
-            assert result is not None
-            # In the refactored implementation, a real orchestrator is created rather than returning the mock
-            # The test validates that the timeout handling works correctly
+        pytest.skip("Orchestrator manager removed; see prompt flow unit tests.")
 
 
 ### Tests for Crescendo Orchestrator ###
@@ -891,103 +798,12 @@ class TestCrescendoOrchestrator:
     @pytest.mark.asyncio
     async def test_crescendo_orchestrator_initialization_and_run(self, red_team_instance):
         """Test the initialization and basic run of CrescendoOrchestrator."""
-        mock_chat_target = MagicMock(spec=PromptChatTarget)
-        mock_prompts = ["Test prompt 1", "Test prompt 2"]
-        mock_converter = MagicMock(spec=PromptConverter)
-        strategy_name = "crescendo_strategy"
-        risk_category_name = "mock_risk_category"
-        risk_category = RiskCategory.HateUnfairness
-
-        # Ensure red_team_info structure exists for the test if _crescendo_orchestrator doesn't create it fully
-        red_team_instance.red_team_info[strategy_name] = {risk_category_name: {}}
-
-        mock_crescendo_orchestrator_instance = AsyncMock(spec=CrescendoOrchestrator)
-        mock_crescendo_orchestrator_instance.run_attack_async = AsyncMock()
-
-        # Mock _write_pyrit_outputs_to_file to prevent file writing and FileNotFoundError
-        with patch(
-            "azure.ai.evaluation.red_team._utils.formatting_utils.write_pyrit_outputs_to_file",
-            return_value="mocked_file_path",
-        ) as mock_write_pyrit, patch(
-            "pyrit.orchestrator.multi_turn.crescendo_orchestrator.CrescendoOrchestrator",
-            return_value=mock_crescendo_orchestrator_instance,
-        ) as mock_crescendo_class, patch(
-            "azure.ai.evaluation.red_team._utils._rai_service_target.AzureRAIServiceTarget",
-            AsyncMock(spec=AzureRAIServiceTarget),
-        ) as mock_rai_target, patch(
-            "azure.ai.evaluation.red_team._utils._rai_service_eval_chat_target.RAIServiceEvalChatTarget",
-            AsyncMock(spec=RAIServiceEvalChatTarget),
-        ) as mock_rai_eval_target, patch(
-            "azure.ai.evaluation.red_team._utils._rai_service_true_false_scorer.AzureRAIServiceTrueFalseScorer",
-            AsyncMock(spec=AzureRAIServiceTrueFalseScorer),
-        ) as mock_rai_scorer, patch(
-            "pyrit.memory.CentralMemory.get_memory_instance", return_value=MagicMock()
-        ):
-
-            orchestrator_result = await red_team_instance.orchestrator_manager._crescendo_orchestrator(
-                chat_target=mock_chat_target,
-                all_prompts=mock_prompts,
-                converter=mock_converter,
-                strategy_name=strategy_name,
-                risk_category_name=risk_category_name,
-                risk_category=risk_category,
-                timeout=60,
-            )
-
-            # The method should return a real orchestrator instance, not the mock
-            assert orchestrator_result is not None
-            # In the refactored implementation, real orchestrator instances are created
-            # The important thing is that the method executes successfully
+        pytest.skip("Crescendo orchestrator removed from flow; see prompt flow tests.")
 
     @pytest.mark.asyncio
     async def test_crescendo_orchestrator_general_exception_handling(self, red_team_instance):
         """Test general exception handling in _crescendo_orchestrator."""
-        mock_chat_target = MagicMock(spec=PromptChatTarget)
-        mock_prompts = ["Test prompt exception"]
-        strategy_name = "crescendo_exception_strategy"
-        risk_category_name = "mock_risk_category_exception"
-        risk_category = RiskCategory.Sexual
-
-        red_team_instance.red_team_info[strategy_name] = {risk_category_name: {}}
-
-        mock_crescendo_orchestrator_instance = AsyncMock(spec=CrescendoOrchestrator)
-        # Use the imported PyritException
-        mock_crescendo_orchestrator_instance.run_attack_async.side_effect = PyritException(
-            "Test Pyrit Exception from Crescendo"
-        )
-
-        with patch(
-            "pyrit.orchestrator.multi_turn.crescendo_orchestrator.CrescendoOrchestrator",
-            return_value=mock_crescendo_orchestrator_instance,
-        ), patch(
-            "azure.ai.evaluation.red_team._utils._rai_service_target.AzureRAIServiceTarget",
-            AsyncMock(spec=AzureRAIServiceTarget),
-        ), patch(
-            "azure.ai.evaluation.red_team._utils._rai_service_eval_chat_target.RAIServiceEvalChatTarget",
-            AsyncMock(spec=RAIServiceEvalChatTarget),
-        ), patch(
-            "azure.ai.evaluation.red_team._utils._rai_service_true_false_scorer.AzureRAIServiceTrueFalseScorer",
-            AsyncMock(spec=AzureRAIServiceTrueFalseScorer),
-        ), patch(
-            "azure.ai.evaluation.red_team._utils.formatting_utils.write_pyrit_outputs_to_file"
-        ) as mock_write_output, patch(
-            "pyrit.memory.CentralMemory.get_memory_instance", return_value=MagicMock()
-        ):
-
-            await red_team_instance.orchestrator_manager._crescendo_orchestrator(
-                chat_target=mock_chat_target,
-                all_prompts=mock_prompts,
-                converter=None,
-                strategy_name=strategy_name,
-                risk_category_name=risk_category_name,
-                risk_category=risk_category,
-                timeout=60,
-            )
-
-            red_team_instance.logger.error.assert_called()
-            # Note: In the refactored implementation, status might not be set in the same way
-            # The important thing is that the exception was handled and logged
-            # write_pyrit_outputs_to_file might not be called when exceptions occur early
+        pytest.skip("Crescendo orchestrator removed from flow; see prompt flow tests.")
 
 
 @pytest.mark.unittest
@@ -995,7 +811,7 @@ class TestRedTeamProcessing:
     """Test processing functionality in RedTeam."""
 
     @pytest.mark.asyncio  # Mark as asyncio test
-    async def test_write_pyrit_outputs_to_file(self, red_team, mock_orchestrator):
+    async def test_write_pyrit_outputs_to_file(self, red_team):
         """Test write_pyrit_outputs_to_file utility function."""
         from azure.ai.evaluation.red_team._utils.formatting_utils import write_pyrit_outputs_to_file
 
@@ -1109,7 +925,7 @@ class TestRedTeamProcessing:
         # Note: _write_output might not be called in this specific test scenario with mocked components
 
     @pytest.mark.asyncio
-    async def test_process_attack(self, red_team, mock_orchestrator):
+    async def test_process_attack(self, red_team):
         """Test _process_attack method."""
         mock_strategy = AttackStrategy.Base64
         mock_risk_category = RiskCategory.Violence
@@ -1124,35 +940,38 @@ class TestRedTeamProcessing:
         red_team.scan_output_dir = "/test/output"
         mock_converter = MagicMock(spec=PromptConverter)
 
-        # Mock the orchestrator returned by get_orchestrator_for_attack_strategy
-        # Ensure send_prompts_async is an AsyncMock itself
-        mock_internal_orchestrator = AsyncMock(spec=PromptSendingOrchestrator)
-        mock_internal_orchestrator.send_prompts_async = AsyncMock()  # Explicitly make it async mock
-        mock_internal_orchestrator.dispose_db_engine = MagicMock(return_value=None)
-
-        with patch.object(
-            red_team.orchestrator_manager, "_prompt_sending_orchestrator", return_value=mock_internal_orchestrator
-        ) as mock_prompt_sending_orchestrator, patch(
+        with patch(
+            "azure.ai.evaluation.red_team._red_team.run_prompt_sending_attack_flow",
+            new_callable=AsyncMock,
+        ) as mock_prompt_flow, patch(
             "azure.ai.evaluation.red_team._utils.formatting_utils.write_pyrit_outputs_to_file",
             return_value="/path/to/data.jsonl",
         ) as mock_write_outputs, patch.object(
-            red_team.evaluation_processor, "evaluate", new_callable=AsyncMock
-        ) as mock_evaluate, patch.object(
-            red_team, "task_statuses", {}
+            red_team.evaluation_processor,
+            "evaluate",
+            new_callable=AsyncMock,
+        ) as mock_evaluate, patch(
+            "azure.ai.evaluation.red_team._red_team.ensure_data_file_path",
+            return_value="/tmp/mock_data.jsonl",
+        ) as mock_ensure_data_file_path, patch.object(
+            red_team,
+            "task_statuses",
+            {},
         ), patch.object(
-            red_team, "completed_tasks", 0
+            red_team,
+            "completed_tasks",
+            0,
         ), patch.object(
-            red_team, "total_tasks", 5
+            red_team,
+            "total_tasks",
+            5,
         ), patch.object(
-            red_team, "start_time", datetime.now().timestamp()
+            red_team,
+            "start_time",
+            datetime.now().timestamp(),
         ), patch(
-            "azure.ai.evaluation.red_team._utils.strategy_utils.get_converter_for_strategy", return_value=mock_converter
-        ), patch.object(
-            red_team.orchestrator_manager,
-            "get_orchestrator_for_attack_strategy",
-            return_value=mock_prompt_sending_orchestrator,
-        ) as mock_get_orchestrator, patch(
-            "os.path.join", lambda *args: "/".join(args)
+            "azure.ai.evaluation.red_team._utils.strategy_utils.get_converter_for_strategy",
+            return_value=mock_converter,
         ):
 
             await red_team._process_attack(
@@ -1163,17 +982,33 @@ class TestRedTeamProcessing:
                 progress_bar_lock=mock_progress_bar_lock,
             )
 
-        # Assert that get_orchestrator_for_attack_strategy was called correctly
-        mock_get_orchestrator.assert_called_once_with(mock_strategy)
-
-        # Assert _prompt_sending_orchestrator was called correctly
-        mock_prompt_sending_orchestrator.assert_called_once()
-
-        # Note: write_pyrit_outputs_to_file might not be called in this specific test scenario with mocked components
-        # The important thing is that the process flow executes without error
-
-        # Note: evaluate might not be called in this mocked scenario since we're mocking the internal orchestrator call
-        # The test validates that the orchestrator flow works correctly
+        mock_ensure_data_file_path.assert_called_once_with(
+            red_team.red_team_info,
+            red_team.scan_output_dir,
+            "base64",
+            mock_risk_category,
+        )
+        mock_prompt_flow.assert_awaited_once()
+        await_args = mock_prompt_flow.await_args
+        assert await_args.kwargs == {
+            "strategy_name": "base64",
+            "strategy": mock_strategy,
+            "risk_category": mock_risk_category,
+            "prompts": mock_prompts,
+            "converter": mock_converter,
+            "timeout": 120,
+            "data_file_path": "/tmp/mock_data.jsonl",
+            "logger": red_team.logger,
+            "retry_manager": red_team.retry_manager,
+            "prompt_to_context": red_team.prompt_to_context,
+            "prompt_to_risk_subtype": red_team.prompt_to_risk_subtype,
+            "task_statuses": red_team.task_statuses,
+            "red_team_info": red_team.red_team_info,
+            "chat_target": red_team.chat_target,
+        }
+        mock_write_outputs.assert_called_once()
+        mock_evaluate.assert_awaited_once()
+        assert red_team.task_statuses["base64_violence_attack"] == TASK_STATUS["COMPLETED"]
 
     @pytest.mark.asyncio
     @pytest.mark.skip(reason="Test still work in progress")

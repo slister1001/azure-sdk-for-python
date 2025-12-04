@@ -7,6 +7,7 @@ import itertools
 import logging
 import math
 import os
+from importlib import import_module
 from pathlib import Path
 import random
 import time
@@ -46,7 +47,7 @@ from azure.ai.evaluation._evaluate._utils import _write_output
 from azure.core.credentials import TokenCredential
 
 # Red Teaming imports
-from ._red_team_result import RedTeamResult
+from ._red_team_result import RedTeamResult, DataSource
 from ._attack_strategy import AttackStrategy
 from ._attack_objective_generator import (
     RiskCategory,
@@ -55,7 +56,7 @@ from ._attack_objective_generator import (
 )
 
 # PyRIT imports
-from pyrit.common import initialize_pyrit, DUCK_DB
+from pyrit.common import initialize_pyrit
 from pyrit.prompt_target import PromptChatTarget
 
 # Local imports - constants and utilities
@@ -77,11 +78,14 @@ from ._utils.retry_utils import create_standard_retry_manager
 from ._utils.file_utils import create_file_manager
 from ._utils.metric_mapping import get_attack_objective_from_risk_category
 from ._utils.objective_utils import extract_risk_subtype, get_objective_id
+from ._prompt_attack_executor import ensure_data_file_path, run_prompt_sending_attack_flow
 
-from ._orchestrator_manager import OrchestratorManager
 from ._evaluation_processor import EvaluationProcessor
 from ._mlflow_integration import MLflowIntegration
 from ._result_processor import ResultProcessor
+
+
+DEFAULT_PYRIT_MEMORY_BACKEND = "SQLite"
 
 
 @experimental
@@ -218,8 +222,8 @@ class RedTeam:
         # keep track of prompt content to risk_sub_type mapping for evaluation
         self.prompt_to_risk_subtype = {}
 
-        # Initialize PyRIT
-        initialize_pyrit(memory_db_type=DUCK_DB)
+        # Initialize PyRIT using default SQLite-backed memory.
+        initialize_pyrit(memory_db_type=DEFAULT_PYRIT_MEMORY_BACKEND)
 
         # Initialize attack objective generator
         self.attack_objective_generator = _AttackObjectiveGenerator(
@@ -230,7 +234,6 @@ class RedTeam:
         )
 
         # Initialize component managers (will be set up during scan)
-        self.orchestrator_manager = None
         self.evaluation_processor = None
         self.mlflow_integration = None
         self.result_processor = None
@@ -276,18 +279,6 @@ class RedTeam:
     def _setup_component_managers(self):
         """Initialize component managers with shared configuration."""
         retry_config = self.retry_manager.get_retry_config()
-
-        # Initialize orchestrator manager
-        self.orchestrator_manager = OrchestratorManager(
-            logger=self.logger,
-            generated_rai_client=self.generated_rai_client,
-            credential=self.credential,
-            azure_ai_project=self.azure_ai_project,
-            one_dp_project=self._one_dp_project,
-            retry_config=retry_config,
-            scan_output_dir=self.scan_output_dir,
-            red_team=self,
-        )
 
         # Initialize evaluation processor
         self.evaluation_processor = EvaluationProcessor(
@@ -1115,41 +1106,50 @@ class RedTeam:
             start_time = time.time()
             tqdm.write(f"▶️ Starting task: {strategy_name} strategy for {risk_category.value} risk category")
 
-            # Get converter and orchestrator function
             converter = get_converter_for_strategy(
                 strategy, self.generated_rai_client, self._one_dp_project, self.logger
             )
-            call_orchestrator = self.orchestrator_manager.get_orchestrator_for_attack_strategy(strategy)
 
+            data_file_path = ensure_data_file_path(
+                self.red_team_info,
+                self.scan_output_dir,
+                strategy_name,
+                risk_category,
+            )
             try:
-                self.logger.debug(f"Calling orchestrator for {strategy_name} strategy")
-                orchestrator = await call_orchestrator(
-                    chat_target=self.chat_target,
-                    all_prompts=all_prompts,
-                    converter=converter,
+                await run_prompt_sending_attack_flow(
                     strategy_name=strategy_name,
+                    strategy=strategy,
                     risk_category=risk_category,
-                    risk_category_name=risk_category.value,
+                    prompts=all_prompts,
+                    converter=converter,
                     timeout=timeout,
-                    red_team_info=self.red_team_info,
-                    task_statuses=self.task_statuses,
+                    data_file_path=data_file_path,
+                    logger=self.logger,
+                    retry_manager=self.retry_manager,
                     prompt_to_context=self.prompt_to_context,
+                    prompt_to_risk_subtype=self.prompt_to_risk_subtype,
+                    task_statuses=self.task_statuses,
+                    red_team_info=self.red_team_info,
+                    chat_target=self.chat_target,
                 )
-            except Exception as e:
-                self.logger.error(f"Error calling orchestrator for {strategy_name} strategy: {str(e)}")
+            except Exception as exc:
+                self.logger.error(
+                    "Error executing PromptSendingAttack for %s strategy: %s",
+                    strategy_name,
+                    str(exc),
+                )
                 self.task_statuses[task_key] = TASK_STATUS["FAILED"]
                 self.failed_tasks += 1
                 async with progress_bar_lock:
                     progress_bar.update(1)
                 return None
 
-            # Write PyRIT outputs to file
             data_path = write_pyrit_outputs_to_file(
                 output_path=self.red_team_info[strategy_name][risk_category.value]["data_file"],
                 logger=self.logger,
                 prompt_to_context=self.prompt_to_context,
             )
-            orchestrator.dispose_db_engine()
 
             # Store data file in our tracking dictionary
             self.red_team_info[strategy_name][risk_category.value]["data_file"] = data_path
@@ -1282,7 +1282,6 @@ class RedTeam:
             self.result_processor.ai_studio_url = getattr(self.mlflow_integration, "ai_studio_url", None)
 
             # Update component managers with the new logger
-            self.orchestrator_manager.logger = self.logger
             self.evaluation_processor.logger = self.logger
             self.mlflow_integration.logger = self.logger
             self.result_processor.logger = self.logger
