@@ -73,7 +73,7 @@ from ._utils.formatting_utils import (
     format_scorecard,
     format_content_by_modality,
 )
-from ._utils.strategy_utils import get_chat_target, get_converter_for_strategy
+from ._utils.strategy_utils import get_chat_target
 from ._utils.retry_utils import create_standard_retry_manager
 from ._utils.file_utils import create_file_manager
 from ._utils.metric_mapping import get_attack_objective_from_risk_category
@@ -1106,10 +1106,6 @@ class RedTeam:
             start_time = time.time()
             tqdm.write(f"▶️ Starting task: {strategy_name} strategy for {risk_category.value} risk category")
 
-            converter = get_converter_for_strategy(
-                strategy, self.generated_rai_client, self._one_dp_project, self.logger
-            )
-
             data_file_path = ensure_data_file_path(
                 self.red_team_info,
                 self.scan_output_dir,
@@ -1122,7 +1118,6 @@ class RedTeam:
                     strategy=strategy,
                     risk_category=risk_category,
                     prompts=all_prompts,
-                    converter=converter,
                     timeout=timeout,
                     data_file_path=data_file_path,
                     logger=self.logger,
@@ -1131,11 +1126,14 @@ class RedTeam:
                     prompt_to_risk_subtype=self.prompt_to_risk_subtype,
                     task_statuses=self.task_statuses,
                     red_team_info=self.red_team_info,
+                    rai_client=self.generated_rai_client,
+                    credential=self.credential,
+                    azure_ai_project=self.azure_ai_project,
                     chat_target=self.chat_target,
                 )
             except Exception as exc:
                 self.logger.error(
-                    "Error executing PromptSendingAttack for %s strategy: %s",
+                    "Error executing FoundryScenario for %s strategy: %s",
                     strategy_name,
                     str(exc),
                 )

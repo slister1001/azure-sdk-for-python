@@ -22,7 +22,6 @@ class TokenCredential:  # pragma: no cover - stub for azure.core.credentials.Tok
 
 
 # PyRIT related imports to mock
-from pyrit.prompt_converter import PromptConverter
 from pyrit.orchestrator import PromptSendingOrchestrator
 from pyrit.common import DUCK_DB
 from pyrit.exceptions import PyritException
@@ -938,7 +937,6 @@ class TestRedTeamProcessing:
         red_team.red_team_info = {"base64": {"violence": {}}}
         red_team.chat_target = MagicMock()
         red_team.scan_output_dir = "/test/output"
-        mock_converter = MagicMock(spec=PromptConverter)
 
         with patch(
             "azure.ai.evaluation.red_team._red_team.run_prompt_sending_attack_flow",
@@ -969,9 +967,6 @@ class TestRedTeamProcessing:
             red_team,
             "start_time",
             datetime.now().timestamp(),
-        ), patch(
-            "azure.ai.evaluation.red_team._utils.strategy_utils.get_converter_for_strategy",
-            return_value=mock_converter,
         ):
 
             await red_team._process_attack(
@@ -995,7 +990,6 @@ class TestRedTeamProcessing:
             "strategy": mock_strategy,
             "risk_category": mock_risk_category,
             "prompts": mock_prompts,
-            "converter": mock_converter,
             "timeout": 120,
             "data_file_path": "/tmp/mock_data.jsonl",
             "logger": red_team.logger,
@@ -1004,6 +998,9 @@ class TestRedTeamProcessing:
             "prompt_to_risk_subtype": red_team.prompt_to_risk_subtype,
             "task_statuses": red_team.task_statuses,
             "red_team_info": red_team.red_team_info,
+            "rai_client": red_team.generated_rai_client,
+            "credential": red_team.credential,
+            "azure_ai_project": red_team.azure_ai_project,
             "chat_target": red_team.chat_target,
         }
         mock_write_outputs.assert_called_once()

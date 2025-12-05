@@ -12,14 +12,16 @@ from typing import Any, Dict, List, Optional, Union
 
 import tenacity
 
-from pyrit.executor.attack import AttackConverterConfig, AttackScoringConfig
-from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
-from pyrit.prompt_converter import PromptConverter
-from pyrit.prompt_normalizer import PromptConverterConfiguration
+from azure.ai.evaluation.simulator._model_tools._generated_rai_client import GeneratedRAIClient
+from pyrit.executor.attack import AttackScoringConfig
+from pyrit.scenario import FoundryScenario
+from pyrit.scenario.scenarios.foundry_scenario import FoundryStrategy
 from pyrit.prompt_target import PromptChatTarget
 
 from ._attack_objective_generator import RiskCategory
 from ._attack_strategy import AttackStrategy
+from ._strategy_mapping import map_to_foundry_strategy, requires_custom_handling
+from ._utils._rai_service_true_false_scorer import AzureRAIServiceTrueFalseScorer
 from ._utils.constants import DATA_EXT, TASK_STATUS
 from ._utils.retry_utils import RetryManager
 
@@ -64,23 +66,6 @@ def calculate_prompt_timeout(base_timeout: int, strategy: Union[AttackStrategy, 
     return max(1, int(base_timeout * multiplier))
 
 
-def _flatten_prompt_converters(converter: Union[PromptConverter, List[PromptConverter], None]) -> List[PromptConverter]:
-    """Normalize converter definitions into a flat list of PromptConverter instances."""
-
-    if converter is None:
-        return []
-
-    if isinstance(converter, PromptConverter):
-        return [converter]
-
-    flattened: List[PromptConverter] = []
-    if isinstance(converter, (list, tuple)):
-        for item in converter:
-            flattened.extend(_flatten_prompt_converters(item))
-
-    return [conv for conv in flattened if isinstance(conv, PromptConverter)]
-
-
 def _normalize_context_for_prompt(prompt: str, prompt_to_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Normalize stored context data into the structure expected for memory labels."""
 
@@ -103,7 +88,6 @@ async def run_prompt_sending_attack_flow(
     strategy: Union[AttackStrategy, List[AttackStrategy]],
     risk_category: RiskCategory,
     prompts: List[str],
-    converter: Union[PromptConverter, List[PromptConverter], None],
     timeout: int,
     data_file_path: str,
     logger: logging.Logger,
@@ -112,55 +96,125 @@ async def run_prompt_sending_attack_flow(
     prompt_to_risk_subtype: Optional[Dict[str, Any]],
     task_statuses: Dict[str, str],
     red_team_info: Dict[str, Dict[str, Dict[str, Any]]],
+    rai_client: GeneratedRAIClient,
+    credential: Any,
+    azure_ai_project: Any,
     chat_target: PromptChatTarget,
 ) -> None:
-    """Execute a single-turn attack flow using PyRIT's PromptSendingAttack primitives."""
+    """Execute attacks using PyRIT's FoundryScenario with one AtomicAttack per prompt.
+
+    This function leverages FoundryScenario's orchestration capabilities while maintaining
+    per-prompt granularity for context and scoring. Each prompt is executed as a separate
+    atomic attack with its own scorer instance and memory labels.
+
+    :param strategy_name: Display name for the strategy being executed
+    :param strategy: AttackStrategy or list of strategies to use
+    :param risk_category: Risk category for this attack run
+    :param prompts: List of objective prompts to execute
+    :param timeout: Base timeout in seconds per prompt
+    :param data_file_path: Path to the data file for tracking
+    :param logger: Logger instance for diagnostic output
+    :param retry_manager: Optional retry configuration for transient failures
+    :param prompt_to_context: Mapping from prompt to context metadata
+    :param prompt_to_risk_subtype: Mapping from prompt to risk subtype
+    :param task_statuses: Dict tracking status of each task
+    :param red_team_info: Dict tracking overall red team execution state
+    :param rai_client: Authenticated RAI client for scoring
+    :param credential: Credential to authorize scoring requests
+    :param azure_ai_project: Azure AI project scope metadata
+    :param chat_target: PyRIT target for objective execution
+    """
 
     if not prompts:
         logger.warning(
-            "No prompts provided to PromptSendingAttack for %s/%s; skipping execution.",
+            "No prompts provided to FoundryScenario for %s/%s; skipping execution.",
             strategy_name,
             risk_category.value,
         )
         return
 
-    converters = _flatten_prompt_converters(converter)
-    request_configurations = PromptConverterConfiguration.from_converters(converters=converters)
-    attack_converter_config = AttackConverterConfig(request_converters=request_configurations)
-    attack = PromptSendingAttack(
-        objective_target=chat_target,
-        attack_converter_config=attack_converter_config,
-        attack_scoring_config=AttackScoringConfig(),
-    )
+    # Map AttackStrategy to FoundryStrategy
+    strategies = [strategy] if isinstance(strategy, AttackStrategy) else strategy
+    mapped_strategies = []
+    
+    for strat in strategies:
+        if requires_custom_handling(strat):
+            logger.warning(
+                "Strategy %s requires custom handling; falling back to baseline execution.",
+                strat.value,
+            )
+            # For IndirectJailbreak/Baseline, use Jailbreak as closest equivalent
+            mapped_strategies.append(FoundryStrategy.Jailbreak)
+        else:
+            foundry_strat = map_to_foundry_strategy(strat)
+            if foundry_strat:
+                mapped_strategies.append(foundry_strat)
+    
+    if not mapped_strategies:
+        logger.error("No valid FoundryStrategy mapping found for %s", strategy_name)
+        return
 
     calculated_timeout = calculate_prompt_timeout(timeout, strategy)
 
+    # Execute each prompt as a separate atomic attack to preserve per-prompt context
     for prompt_idx, prompt in enumerate(prompts):
         prompt_start_time = datetime.now()
         context_dict = _normalize_context_for_prompt(prompt, prompt_to_context)
         risk_sub_type = prompt_to_risk_subtype.get(prompt) if prompt_to_risk_subtype else None
 
+        contexts = context_dict.get("contexts", [])
+        context_string = ""
+        if contexts:
+            context_string = "\n".join(
+                ctx.get("content", "") if isinstance(ctx, dict) else str(ctx) for ctx in contexts
+            )
+
+        # Create a scorer tailored to this prompt so context stays accurate
+        objective_scorer = AzureRAIServiceTrueFalseScorer(
+            client=rai_client,
+            risk_category=risk_category,
+            credential=credential,
+            azure_ai_project=azure_ai_project,
+            logger=logger,
+            context=context_string,
+        )
+
+        # Build memory labels for this specific prompt
         memory_labels: Dict[str, Any] = {
             "risk_strategy_path": data_file_path,
             "batch": prompt_idx + 1,
             "context": context_dict,
+            "strategy_name": strategy_name,
         }
         if risk_sub_type:
             memory_labels["risk_sub_type"] = risk_sub_type
 
-        async def _execute_attack() -> None:
+        # Create a scenario with a single objective for this prompt
+        scenario = FoundryScenario(
+            objective_target=chat_target,
+            objective_scorer=objective_scorer,
+        )
+
+        async def _execute_scenario() -> None:
+            """Execute the scenario with timeout and proper initialization."""
+            await scenario.initialize_async(
+                scenario_strategies=mapped_strategies,
+                objectives=[prompt],
+                memory_labels=memory_labels,
+            )
+            
             await asyncio.wait_for(
-                attack.execute_async(objective=prompt, memory_labels=memory_labels),
+                scenario.run_async(),
                 timeout=calculated_timeout,
             )
 
         retry_decorator = None
         if retry_manager is not None:
             retry_decorator = retry_manager.create_retry_decorator(
-                context=f"prompt_sending:{strategy_name}:{risk_category.value}:prompt_{prompt_idx + 1}"
+                context=f"foundry_scenario:{strategy_name}:{risk_category.value}:prompt_{prompt_idx + 1}"
             )
 
-        execute_with_retry = retry_decorator(_execute_attack) if retry_decorator else _execute_attack
+        execute_with_retry = retry_decorator(_execute_scenario) if retry_decorator else _execute_scenario
 
         try:
             await execute_with_retry()
