@@ -41,14 +41,13 @@
         "cognitiveServicesAccountName": "[concat('cog-', variables('uniqueName'))]",
         "workspaceName": "[concat('ws-', variables('uniqueName'))]",
         "storageAccountName": "[concat('st', uniqueString(resourceGroup().id))]",
-        "keyVaultName": "[concat('kv-', uniqueString(resourceGroup().id))]",
+        "keyVaultName": "[concat('kv', uniqueString(resourceGroup().id))]",
         "appInsightsName": "[concat('ai-', variables('uniqueName'))]",
         "openAIDeploymentName": "gpt-35-turbo",
         "openAIModelName": "gpt-35-turbo",
         "openAIModelVersion": "0613",
         "cognitiveServicesApiVersion": "2023-05-01",
         "workspaceApiVersion": "2023-04-01",
-        "roleDefinitionId": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Authorization/roleDefinitions/a97b65f3-24c7-4388-baec-2e87135dc908')]",
         "cognitiveServicesUserRoleId": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Authorization/roleDefinitions/a97b65f3-24c7-4388-baec-2e87135dc908')]"
     },
     "resources": [

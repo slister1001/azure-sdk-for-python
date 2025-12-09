@@ -329,6 +329,11 @@ def _get_connection_from_env() -> Dict[str, Any]:
     
     This is used when connections.json doesn't exist, typically in CI/CD pipelines
     where test-resources.json ARM template provisions resources and sets environment variables.
+    
+    Returns:
+        Dict[str, Any]: A dictionary matching the connections.json format, where each key
+            maps to a dict with a "value" key containing the actual configuration.
+            Example: {"azure_ai_project_scope": {"value": {"subscription_id": "...", ...}}}
     """
     connections = {}
     
