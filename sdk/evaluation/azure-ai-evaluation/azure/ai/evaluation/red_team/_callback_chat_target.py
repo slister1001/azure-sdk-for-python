@@ -30,7 +30,7 @@ class _CallbackChatTarget(PromptChatTarget):
             callback (Callable): The callback function that sends a prompt to a target and receives a response.
             stream (bool, optional): Indicates whether the target supports streaming. Defaults to False.
         """
-        # PromptChatTarget.__init__(self)
+        PromptChatTarget.__init__(self)
         self._callback = callback
         self._stream = stream
 
