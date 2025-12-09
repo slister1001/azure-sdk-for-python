@@ -14,7 +14,7 @@ from azure.ai.evaluation._common.rai_service import evaluate_with_rai_service
 from azure.ai.evaluation.simulator._model_tools._generated_rai_client import (
     GeneratedRAIClient,
 )
-from pyrit.models import PromptRequestResponse, construct_response_from_request
+from pyrit.models import Message, construct_response_from_request
 from pyrit.prompt_target import PromptChatTarget
 
 from .metric_mapping import (
@@ -52,12 +52,13 @@ class RAIServiceEvalChatTarget(PromptChatTarget):
         self.context = context
 
     async def send_prompt_async(
-        self, *, prompt_request: PromptRequestResponse, objective: str = ""
-    ) -> PromptRequestResponse:
+        self, *, message: Message, objective: str = ""
+    ) -> List[Message]:
         self.logger.info("Starting send_prompt_async operation")
-        self._validate_request(prompt_request=prompt_request)
+        self._validate_request(message=message)
 
-        thing_to_eval = prompt_request.request_pieces[0].to_dict()["original_value"]
+        request_piece = message.get_piece(0)
+        thing_to_eval = request_piece.to_dict()["original_value"]
 
         thing_to_eval_qr = {"query": "query", "response": thing_to_eval, "context": self.context}
 
@@ -102,11 +103,11 @@ class RAIServiceEvalChatTarget(PromptChatTarget):
 
         # Construct the response
         response = construct_response_from_request(
-            request=prompt_request.request_pieces[0],
+            request=request_piece,
             response_text_pieces=[response_json],
         )
         self.logger.info(f"Constructed response: {response}")
-        return response
+        return [response]
 
     def is_json_response_supported(self) -> bool:
         """Check if JSON response is supported.
@@ -116,13 +117,13 @@ class RAIServiceEvalChatTarget(PromptChatTarget):
         # This target supports JSON responses
         return True
 
-    def _validate_request(self, *, prompt_request: PromptRequestResponse) -> None:
+    def _validate_request(self, *, message: Message) -> None:
         """Validate the request.
 
-        :param prompt_request: The prompt request
+        :param message: The prompt request message
         """
-        if len(prompt_request.request_pieces) != 1:
+        if len(message.message_pieces) != 1:
             raise ValueError("This target only supports a single prompt request piece.")
 
-        if prompt_request.request_pieces[0].converted_value_data_type != "text":
+        if message.get_piece(0).converted_value_data_type != "text":
             raise ValueError("This target only supports text prompt input.")

@@ -1,8 +1,9 @@
-import pytest
-import unittest.mock as mock
-import json
-import uuid
 import asyncio
+import json
+import unittest.mock as mock
+import uuid
+
+import pytest
 
 
 try:
@@ -13,11 +14,13 @@ except ImportError:
     has_pyrit = False
 
 if has_pyrit:
-    from pyrit.common import initialize_pyrit, IN_MEMORY
-
-    initialize_pyrit(memory_db_type=IN_MEMORY)
     from azure.ai.evaluation.red_team._utils._rai_service_target import AzureRAIServiceTarget
-    from pyrit.models import PromptRequestResponse, PromptRequestPiece
+    from pyrit.models import Message, MessagePiece
+    from pyrit.memory.central_memory import CentralMemory
+    from pyrit.memory.sqlite_memory import SQLiteMemory
+
+    SQLiteMemory._instances.pop(SQLiteMemory, None)
+    CentralMemory.set_memory_instance(SQLiteMemory(db_path=":memory:"))
 
 
 # Basic mocks
@@ -40,8 +43,8 @@ MockGeneratedRAIClient._client.rai_svc = MockRAISvc
 
 
 @pytest.fixture
-def mock_prompt_request():
-    piece = PromptRequestPiece(
+def mock_message():
+    piece = MessagePiece(
         role="user",
         original_value="Test prompt for simulation",
         converted_value="Test prompt for simulation",
@@ -50,7 +53,7 @@ def mock_prompt_request():
         original_value_data_type="text",
         converted_value_data_type="text",
     )
-    return PromptRequestResponse(request_pieces=[piece])
+    return Message([piece])
 
 
 @pytest.fixture
@@ -279,7 +282,7 @@ async def test_process_response(rai_target, raw_response, expected_content):
 @mock.patch("azure.ai.evaluation.red_team._utils._rai_service_target.AzureRAIServiceTarget._poll_operation_result")
 @mock.patch("azure.ai.evaluation.red_team._utils._rai_service_target.AzureRAIServiceTarget._process_response")
 async def test_send_prompt_async_success_flow(
-    mock_process, mock_poll, mock_extract, mock_create, rai_target, mock_prompt_request
+    mock_process, mock_poll, mock_extract, mock_create, rai_target, mock_message
 ):
     """Tests the successful end-to-end flow of send_prompt_async."""
     mock_create.return_value = {"body": "sim_request"}
@@ -296,7 +299,7 @@ async def test_send_prompt_async_success_flow(
     mock_poll.return_value = {"status": "succeeded", "raw": "poll_result"}
     mock_process.return_value = {"processed": "final_content"}
 
-    response = await rai_target.send_prompt_async(prompt_request=mock_prompt_request, objective="override_objective")
+    response_messages = await rai_target.send_prompt_async(message=mock_message, objective="override_objective")
 
     mock_create.assert_called_once_with("Test prompt for simulation", "override_objective")
     # We're not using MockRAISvc anymore, so don't assert on it
@@ -305,14 +308,14 @@ async def test_send_prompt_async_success_flow(
     mock_poll.assert_called_once_with("mock-op-id")
     mock_process.assert_called_once_with({"status": "succeeded", "raw": "poll_result"})
 
-    assert len(response.request_pieces) == 1
-    response_piece = response.request_pieces[0]
+    assert len(response_messages) == 1
+    response_piece = response_messages[0].get_piece(0)
     assert response_piece.role == "assistant"
     assert json.loads(response_piece.converted_value) == {"processed": "final_content"}
 
 
 @pytest.mark.asyncio
-async def test_send_prompt_async_exception_fallback(rai_target, mock_prompt_request, monkeypatch):
+async def test_send_prompt_async_exception_fallback(rai_target, mock_message, monkeypatch):
     """Tests fallback response generation on exception during send_prompt_async."""
     # Import the module to patch
     from azure.ai.evaluation.red_team._utils import _rai_service_target
@@ -348,14 +351,14 @@ async def test_send_prompt_async_exception_fallback(rai_target, mock_prompt_requ
     with patch.object(rai_target, "_extract_operation_id", side_effect=mock_extract_operation_id):
 
         # Call the function, which should trigger retries and eventually use fallback
-        response = await rai_target.send_prompt_async(prompt_request=mock_prompt_request)
+        response_messages = await rai_target.send_prompt_async(message=mock_message)
 
         # Verify that our exception was triggered multiple times (showing retry happened)
         assert call_count >= 5, f"Expected at least 5 retries but got {call_count}"
 
         # Verify we got a valid response with the expected structure
-        assert len(response.request_pieces) == 1
-        response_piece = response.request_pieces[0]
+        assert len(response_messages) == 1
+        response_piece = response_messages[0].get_piece(0)
         assert response_piece.role == "assistant"
         # Check if the response is the fallback JSON with expected fields
         fallback_content = json.loads(response_piece.converted_value)
@@ -363,26 +366,26 @@ async def test_send_prompt_async_exception_fallback(rai_target, mock_prompt_requ
         assert "rationale_behind_jailbreak" in fallback_content
 
 
-def test_validate_request_success(rai_target, mock_prompt_request):
+def test_validate_request_success(rai_target, mock_message):
     """Tests successful validation."""
     try:
-        rai_target._validate_request(prompt_request=mock_prompt_request)
+        rai_target._validate_request(message=mock_message)
     except ValueError:
         pytest.fail("_validate_request raised ValueError unexpectedly")
 
 
-def test_validate_request_invalid_pieces(rai_target, mock_prompt_request):
+def test_validate_request_invalid_pieces(rai_target, mock_message):
     """Tests validation failure with multiple pieces."""
-    mock_prompt_request.request_pieces.append(mock_prompt_request.request_pieces[0])  # Add a second piece
+    mock_message.message_pieces.append(mock_message.message_pieces[0])
     with pytest.raises(ValueError, match="only supports a single prompt request piece"):
-        rai_target._validate_request(prompt_request=mock_prompt_request)
+        rai_target._validate_request(message=mock_message)
 
 
-def test_validate_request_invalid_type(rai_target, mock_prompt_request):
+def test_validate_request_invalid_type(rai_target, mock_message):
     """Tests validation failure with non-text data type."""
-    mock_prompt_request.request_pieces[0].converted_value_data_type = "image"
+    mock_message.message_pieces[0].converted_value_data_type = "image"
     with pytest.raises(ValueError, match="only supports text prompt input"):
-        rai_target._validate_request(prompt_request=mock_prompt_request)
+        rai_target._validate_request(message=mock_message)
 
 
 def test_is_json_response_supported(rai_target):

@@ -4,10 +4,7 @@
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
-from pyrit.models import (
-    PromptRequestResponse,
-    construct_response_from_request,
-)
+from pyrit.models import Message, construct_response_from_request
 from pyrit.prompt_target import PromptChatTarget
 
 logger = logging.getLogger(__name__)
@@ -33,14 +30,14 @@ class _CallbackChatTarget(PromptChatTarget):
             callback (Callable): The callback function that sends a prompt to a target and receives a response.
             stream (bool, optional): Indicates whether the target supports streaming. Defaults to False.
         """
-        PromptChatTarget.__init__(self)
+        # PromptChatTarget.__init__(self)
         self._callback = callback
         self._stream = stream
 
-    async def send_prompt_async(self, *, prompt_request: PromptRequestResponse) -> PromptRequestResponse:
+    async def send_prompt_async(self, *, message: Message) -> List[Message]:
 
-        self._validate_request(prompt_request=prompt_request)
-        request = prompt_request.request_pieces[0]
+        self._validate_request(message=message)
+        request = message.get_piece(0)
 
         messages = self._memory.get_chat_messages_with_conversation_id(conversation_id=request.conversation_id)
 
@@ -97,17 +94,17 @@ class _CallbackChatTarget(PromptChatTarget):
 
         # Add token_usage to the response entry's labels (not the request)
         if token_usage:
-            response_entry.request_pieces[0].labels["token_usage"] = token_usage
+            response_entry.get_piece(0).labels["token_usage"] = token_usage
             logger.debug(f"Captured token usage from callback: {token_usage}")
 
         logger.info("Received the following response from the prompt target" + f"{response_text}")
-        return response_entry
+        return [response_entry]
 
-    def _validate_request(self, *, prompt_request: PromptRequestResponse) -> None:
-        if len(prompt_request.request_pieces) != 1:
+    def _validate_request(self, *, message: Message) -> None:
+        if len(message.message_pieces) != 1:
             raise ValueError("This target only supports a single prompt request piece.")
 
-        if prompt_request.request_pieces[0].converted_value_data_type != "text":
+        if message.get_piece(0).converted_value_data_type != "text":
             raise ValueError("This target only supports text prompt input.")
 
     def is_json_response_supported(self) -> bool:

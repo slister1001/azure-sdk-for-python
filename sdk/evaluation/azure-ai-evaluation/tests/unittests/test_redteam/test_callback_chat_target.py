@@ -2,15 +2,19 @@
 Unit tests for callback_chat_target module.
 """
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from pyrit.common import initialize_pyrit, IN_MEMORY
+import pytest
+
+from pyrit.models import Message, MessagePiece
+from pyrit.memory.central_memory import CentralMemory
+from pyrit.memory.sqlite_memory import SQLiteMemory
+
+SQLiteMemory._instances.pop(SQLiteMemory, None)
+CentralMemory.set_memory_instance(SQLiteMemory(db_path=":memory:"))
 
 from azure.ai.evaluation.red_team._callback_chat_target import _CallbackChatTarget
-
-initialize_pyrit(memory_db_type=IN_MEMORY)
 
 
 @pytest.fixture(scope="function")
@@ -33,23 +37,16 @@ def chat_target(mock_callback):
 
 
 @pytest.fixture(scope="function")
-def mock_request():
-    """Create a mocked request object that mimics PromptRequestResponse from pyrit."""
-    request_piece = MagicMock()
-    request_piece.conversation_id = "test-id"
-    request_piece.converted_value = "test prompt"
-    request_piece.converted_value_data_type = "text"
-    request_piece.to_chat_message.return_value = MagicMock(role="user", content="test prompt")
-    request_piece.labels.get.return_value = None
-
-    request = MagicMock()
-    request.request_pieces = [request_piece]
-    request.response_pieces = []
-
-    # Mock the constructor pattern used by _CallbackChatTarget
-    response_piece = MagicMock()
-    request.from_response = MagicMock(return_value=request)
-    return request
+def mock_message():
+    """Create a Message object compatible with the new PyRIT API."""
+    request_piece = MessagePiece(
+        role="user",
+        original_value="test prompt",
+        converted_value="test prompt",
+        conversation_id="test-id",
+    )
+    request_piece.labels = {}
+    return Message([request_piece])
 
 
 @pytest.mark.unittest
@@ -73,7 +70,7 @@ class TestCallbackChatTargetPrompts:
     """Test _CallbackChatTarget prompt handling."""
 
     @pytest.mark.asyncio
-    async def test_send_prompt_async(self, chat_target, mock_request, mock_callback):
+    async def test_send_prompt_async(self, chat_target, mock_message, mock_callback):
         """Test send_prompt_async method."""
         with patch.object(chat_target, "_memory") as mock_memory, patch(
             "azure.ai.evaluation.red_team._callback_chat_target.construct_response_from_request"
@@ -82,10 +79,10 @@ class TestCallbackChatTargetPrompts:
             mock_memory.get_chat_messages_with_conversation_id.return_value = []
 
             # Setup construct_response mock
-            mock_construct.return_value = mock_request
+            mock_construct.return_value = mock_message
 
             # Call the method
-            response = await chat_target.send_prompt_async(prompt_request=mock_request)
+            response = await chat_target.send_prompt_async(message=mock_message)
 
             # Check that callback was called with correct parameters
             mock_callback.assert_called_once()
@@ -101,15 +98,14 @@ class TestCallbackChatTargetPrompts:
     async def test_send_prompt_async_with_context_from_labels(self, chat_target, mock_callback):
         """Test send_prompt_async method with context from request labels."""
         # Create a request with context in labels
-        request_piece = MagicMock()
-        request_piece.conversation_id = "test-id"
-        request_piece.converted_value = "test prompt"
-        request_piece.converted_value_data_type = "text"
-        request_piece.to_chat_message.return_value = MagicMock(role="user", content="test prompt")
+        request_piece = MessagePiece(
+            role="user",
+            original_value="test prompt",
+            converted_value="test prompt",
+            conversation_id="test-id",
+        )
         request_piece.labels = {"context": {"contexts": ["test context data"]}}
-
-        mock_request = MagicMock()
-        mock_request.request_pieces = [request_piece]
+        mock_message = Message([request_piece])
 
         with patch.object(chat_target, "_memory") as mock_memory, patch(
             "azure.ai.evaluation.red_team._callback_chat_target.construct_response_from_request"
@@ -118,10 +114,10 @@ class TestCallbackChatTargetPrompts:
             mock_memory.get_chat_messages_with_conversation_id.return_value = []
 
             # Setup construct_response mock
-            mock_construct.return_value = mock_request
+            mock_construct.return_value = mock_message
 
             # Call the method
-            response = await chat_target.send_prompt_async(prompt_request=mock_request)
+            response = await chat_target.send_prompt_async(message=mock_message)
 
             # Check that callback was called with correct parameters including context from labels
             mock_callback.assert_called_once()
@@ -135,23 +131,24 @@ class TestCallbackChatTargetPrompts:
 
     def test_validate_request_multiple_pieces(self, chat_target):
         """Test _validate_request with multiple request pieces."""
-        mock_req = MagicMock()
-        mock_req.request_pieces = [MagicMock(), MagicMock()]  # Two pieces
+        pieces = [
+            MessagePiece(role="user", original_value="a", conversation_id="test", sequence=0),
+            MessagePiece(role="user", original_value="b", conversation_id="test", sequence=0),
+        ]
+        mock_message = Message(pieces)
 
         with pytest.raises(ValueError) as excinfo:
-            chat_target._validate_request(prompt_request=mock_req)
+            chat_target._validate_request(message=mock_message)
 
         assert "only supports a single prompt request piece" in str(excinfo.value)
 
     def test_validate_request_non_text_type(self, chat_target):
         """Test _validate_request with non-text data type."""
-        mock_req = MagicMock()
-        mock_piece = MagicMock()
-        mock_piece.converted_value_data_type = "image"  # Not text
-        mock_req.request_pieces = [mock_piece]
+        mock_piece = MessagePiece(role="user", original_value="img", original_value_data_type="image_path")
+        mock_message = Message([mock_piece])
 
         with pytest.raises(ValueError) as excinfo:
-            chat_target._validate_request(prompt_request=mock_req)
+            chat_target._validate_request(message=mock_message)
 
         assert "only supports text prompt input" in str(excinfo.value)
 

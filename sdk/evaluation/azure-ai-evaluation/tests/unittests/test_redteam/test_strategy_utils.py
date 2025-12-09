@@ -6,8 +6,6 @@ import pytest
 from unittest.mock import MagicMock, patch
 from typing import Dict, List, Callable
 
-from pyrit.common import initialize_pyrit, IN_MEMORY
-
 from azure.ai.evaluation.red_team._utils.strategy_utils import (
     strategy_converter_map,
     get_converter_for_strategy,
@@ -17,8 +15,6 @@ from azure.ai.evaluation.red_team._attack_strategy import AttackStrategy
 from azure.ai.evaluation.red_team._callback_chat_target import _CallbackChatTarget
 from pyrit.prompt_converter import PromptConverter, Base64Converter, FlipConverter, MorseConverter
 from pyrit.prompt_target import PromptChatTarget, OpenAIChatTarget
-
-initialize_pyrit(memory_db_type=IN_MEMORY)
 
 
 @pytest.mark.unittest

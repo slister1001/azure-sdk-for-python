@@ -5,8 +5,9 @@
 import logging
 from typing import List, Optional
 
-from pyrit.models import Score, PromptRequestPiece, UnvalidatedScore
+from pyrit.models import MessagePiece, Score, UnvalidatedScore
 from pyrit.score.scorer import Scorer
+from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 
 from azure.ai.evaluation.simulator._model_tools._generated_rai_client import GeneratedRAIClient
 from ._rai_service_eval_chat_target import RAIServiceEvalChatTarget
@@ -38,6 +39,7 @@ class AzureRAIServiceTrueFalseScorer(Scorer):
         prompt_template_key: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
         context: Optional[str] = None,
+        validator: Optional[ScorerPromptValidator] = None,
     ) -> None:
         """Initialize the scorer.
 
@@ -47,12 +49,17 @@ class AzureRAIServiceTrueFalseScorer(Scorer):
         :param prompt_template_key: Optional prompt template key to use
         :param logger: Optional logger to use
         """
-        super().__init__()
+        validator = validator or ScorerPromptValidator(
+            supported_data_types=("text",),
+            supported_roles=("assistant",),
+            max_pieces_in_response=1,
+        )
+        super().__init__(validator=validator)
         self._client = client
         self._api_version = api_version
         self._model = model
         self._prompt_template_key = prompt_template_key
-        self.logger = logger
+        self.logger = logger or logging.getLogger(__name__)
         self.context = context
 
         # Use AzureRAIServiceTarget for scoring as well
@@ -64,51 +71,38 @@ class AzureRAIServiceTrueFalseScorer(Scorer):
             context=context,
         )
 
-    async def score_async(
-        self,
-        request_response: PromptRequestPiece,
-        *,
-        task: Optional[str] = None,
+    async def _score_piece_async(
+        self, message_piece: MessagePiece, *, objective: Optional[str] = None
     ) -> List[Score]:
-        """Score a prompt response asynchronously.
-
-        :param request_response: The prompt response to score (PromptRequestPiece)
-        :param task: Optional task description (objective)
-        :return: List of Score objects
-        """
-        self.logger.info(f"Starting to score prompt response")
-
-        # Validate request_response
-        self.validate(request_response, task=task)
+        """Score a single message piece using the Azure RAI service."""
+        self.logger.info("Starting to score prompt response")
 
         if not self._scoring_target_red_llm.context:
-            self._scoring_target_red_llm.context = request_response.labels.get("context", "")
+            self._scoring_target_red_llm.context = message_piece.labels.get("context", "")
+
+        derived_objective = objective or message_piece.labels.get("objective")
 
         unvalidated_score: UnvalidatedScore = await self._score_value_with_llm(
             prompt_target=self._scoring_target_red_llm,
-            system_prompt="Please evaluate the following response.",  # TODO: What should this be?
-            prompt_request_value=request_response.converted_value,
-            prompt_request_data_type=request_response.converted_value_data_type,
-            scored_prompt_id=request_response.id,
-            task=task,
-            orchestrator_identifier=request_response.orchestrator_identifier,
+            system_prompt="Please evaluate the following response.",
+            message_value=message_piece.converted_value,
+            message_data_type=message_piece.converted_value_data_type,
+            scored_prompt_id=str(message_piece.id),
+            objective=derived_objective,
+            attack_identifier=message_piece.attack_identifier or None,
         )
 
-        score = unvalidated_score.to_score(score_value=unvalidated_score.raw_score_value)
+        score = unvalidated_score.to_score(
+            score_value=unvalidated_score.raw_score_value,
+            score_type=self.scorer_type,
+        )
 
-        # self._memory.add_scores_to_memory(scores=[score])
         return [score]
 
-    def validate(self, request_response, *, task: Optional[str] = None):
-        """Validates the request_response piece to score.
-
-        This method checks if the request_response is valid for scoring by this scorer.
-
-        :param request_response: The request response to be validated
-        :param task: The task based on which the text should be scored (the original attacker model's objective)
-        :raises: ValueError if the request_response is invalid
-        """
-
-        # Additional validation can be added here as needed
-        # For now we'll keep it simple since we handle conversion to PromptRequestResponse in score_async
-        pass
+    def validate_return_scores(self, scores: List[Score]):
+        """Ensure returned scores align with the expected scorer type."""
+        for score in scores:
+            if score.score_type != self.scorer_type:
+                raise ValueError(
+                    f"Score type {score.score_type} does not match expected {self.scorer_type} for {self.__class__.__name__}."
+                )

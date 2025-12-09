@@ -56,7 +56,6 @@ from ._attack_objective_generator import (
 )
 
 # PyRIT imports
-from pyrit.common import initialize_pyrit
 from pyrit.prompt_target import PromptChatTarget
 
 # Local imports - constants and utilities
@@ -84,8 +83,6 @@ from ._evaluation_processor import EvaluationProcessor
 from ._mlflow_integration import MLflowIntegration
 from ._result_processor import ResultProcessor
 
-
-DEFAULT_PYRIT_MEMORY_BACKEND = "SQLite"
 
 
 @experimental
@@ -221,9 +218,6 @@ class RedTeam:
 
         # keep track of prompt content to risk_sub_type mapping for evaluation
         self.prompt_to_risk_subtype = {}
-
-        # Initialize PyRIT using default SQLite-backed memory.
-        initialize_pyrit(memory_db_type=DEFAULT_PYRIT_MEMORY_BACKEND)
 
         # Initialize attack objective generator
         self.attack_objective_generator = _AttackObjectiveGenerator(

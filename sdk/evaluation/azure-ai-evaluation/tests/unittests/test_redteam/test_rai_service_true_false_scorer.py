@@ -1,6 +1,7 @@
-import pytest
-import unittest.mock as mock
 import logging
+import unittest.mock as mock
+
+import pytest
 
 try:
     import pyrit
@@ -12,10 +13,12 @@ except ImportError:
 if has_pyrit:
     from azure.ai.evaluation.red_team._utils._rai_service_true_false_scorer import AzureRAIServiceTrueFalseScorer
     from azure.ai.evaluation.red_team._attack_objective_generator import RiskCategory
-    from pyrit.models import PromptRequestPiece, Score, UnvalidatedScore
-    from pyrit.common import initialize_pyrit, IN_MEMORY
+    from pyrit.models import Message, MessagePiece, Score, UnvalidatedScore
+    from pyrit.memory.central_memory import CentralMemory
+    from pyrit.memory.sqlite_memory import SQLiteMemory
 
-    initialize_pyrit(memory_db_type=IN_MEMORY)
+    SQLiteMemory._instances.pop(SQLiteMemory, None)
+    CentralMemory.set_memory_instance(SQLiteMemory(db_path=":memory:"))
 
 # Mocks
 MockGeneratedRAIClient = mock.Mock()
@@ -26,8 +29,8 @@ MockRAIServiceEvalChatTarget = mock.Mock()
 
 
 @pytest.fixture
-def mock_prompt_request_piece():
-    return PromptRequestPiece(
+def mock_message_piece():
+    return MessagePiece(
         role="assistant",
         original_value="Response to score",
         converted_value="Response to score",
@@ -36,8 +39,14 @@ def mock_prompt_request_piece():
         original_value_data_type="text",
         converted_value_data_type="text",
         id="test_piece_id",
-        orchestrator_identifier={"test": "id"},
+        labels={"context": "scoring context", "objective": "Evaluate for sexual content"},
+        attack_identifier={"attack": "id"},
     )
+
+
+@pytest.fixture
+def mock_message(mock_message_piece):
+    return Message([mock_message_piece])
 
 
 @pytest.fixture
@@ -58,39 +67,36 @@ def true_false_scorer(mock_chat_target):
     MockLogger.reset_mock()
     mock_chat_target.reset_mock()
     MockRAIServiceEvalChatTarget.reset_mock()  # Reset the instance mock as well
+    MockRAIServiceEvalChatTarget.context = None
     return scorer
 
 
 @pytest.mark.asyncio
 @mock.patch.object(AzureRAIServiceTrueFalseScorer, "_score_value_with_llm")
-@mock.patch.object(AzureRAIServiceTrueFalseScorer, "validate")
-async def test_score_async_success(mock_validate, mock_score_llm, true_false_scorer, mock_prompt_request_piece):
+async def test_score_async_success(mock_score_llm, true_false_scorer, mock_message, mock_message_piece):
     """Tests the successful scoring flow."""
     mock_task = "Evaluate for sexual content"
     mock_unvalidated_score = UnvalidatedScore(
-        score_type="true_false",
         raw_score_value="true",
-        score_rationale="Detected explicit content.",
-        score_metadata="meta",
-        prompt_request_response_id="test_piece_id",
-        task=mock_task,
-        scorer_class_identifier=true_false_scorer.get_identifier(),
-        score_category="test_category",
         score_value_description="test_description",
+        score_category=["test_category"],
+        score_rationale="Detected explicit content.",
+        score_metadata={"meta": "data"},
+        scorer_class_identifier=true_false_scorer.get_identifier(),
+        message_piece_id="test_piece_id",
+        objective=mock_task,
     )
     mock_score_llm.return_value = mock_unvalidated_score
 
-    scores = await true_false_scorer.score_async(mock_prompt_request_piece, task=mock_task)
-
-    mock_validate.assert_called_once_with(mock_prompt_request_piece, task=mock_task)
+    scores = await true_false_scorer.score_async(mock_message, objective=mock_task)
     mock_score_llm.assert_called_once_with(
         prompt_target=MockRAIServiceEvalChatTarget,
         system_prompt="Please evaluate the following response.",
-        prompt_request_value="Response to score",
-        prompt_request_data_type="text",
+        message_value="Response to score",
+        message_data_type="text",
         scored_prompt_id="test_piece_id",
-        task=mock_task,
-        orchestrator_identifier={"test": "id"},
+        objective=mock_task,
+        attack_identifier={"attack": "id"},
     )
 
     assert len(scores) == 1
@@ -98,17 +104,28 @@ async def test_score_async_success(mock_validate, mock_score_llm, true_false_sco
     assert isinstance(score, Score)
     assert score.score_value == "true"
     assert score.score_rationale == "Detected explicit content."
-    assert score.score_metadata == "meta"
+    assert score.score_metadata == {"meta": "data"}
     assert score.scorer_class_identifier["__type__"] == "AzureRAIServiceTrueFalseScorer"
     MockLogger.info.assert_called_with("Starting to score prompt response")
+    assert MockRAIServiceEvalChatTarget.context == "scoring context"
 
 
-def test_validate_no_error(true_false_scorer, mock_prompt_request_piece):
-    """Tests that the current validate method runs without error."""
+def test_validate_return_scores_no_error(true_false_scorer):
+    """Tests that validate_return_scores allows matching score types."""
+    score = Score(
+        score_value="true",
+        score_value_description="desc",
+        score_type="true_false",
+        score_category=["test_category"],
+        score_rationale="",
+        score_metadata={},
+        message_piece_id="piece-id",
+        scorer_class_identifier={"__type__": "AzureRAIServiceTrueFalseScorer"},
+    )
     try:
-        true_false_scorer.validate(mock_prompt_request_piece, task="some task")
+        true_false_scorer.validate_return_scores([score])
     except Exception as e:
-        pytest.fail(f"validate raised an exception unexpectedly: {e}")
+        pytest.fail(f"validate_return_scores raised an exception unexpectedly: {e}")
 
 
 # Add more tests if validate logic becomes more complex
