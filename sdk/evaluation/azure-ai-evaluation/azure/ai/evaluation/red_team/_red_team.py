@@ -7,7 +7,6 @@ import itertools
 import logging
 import math
 import os
-from importlib import import_module
 from pathlib import Path
 import random
 import time
@@ -47,7 +46,7 @@ from azure.ai.evaluation._evaluate._utils import _write_output
 from azure.core.credentials import TokenCredential
 
 # Red Teaming imports
-from ._red_team_result import RedTeamResult, DataSource
+from ._red_team_result import RedTeamResult
 from ._attack_strategy import AttackStrategy
 from ._attack_objective_generator import (
     RiskCategory,
@@ -56,6 +55,7 @@ from ._attack_objective_generator import (
 )
 
 # PyRIT imports
+from pyrit.memory import CentralMemory, SQLiteMemory
 from pyrit.prompt_target import PromptChatTarget
 
 # Local imports - constants and utilities
@@ -77,12 +77,11 @@ from ._utils.retry_utils import create_standard_retry_manager
 from ._utils.file_utils import create_file_manager
 from ._utils.metric_mapping import get_attack_objective_from_risk_category
 from ._utils.objective_utils import extract_risk_subtype, get_objective_id
-from ._prompt_attack_executor import ensure_data_file_path, run_prompt_sending_attack_flow
 
+from ._prompt_attack_executor import run_prompt_sending_attack_flow, ensure_data_file_path
 from ._evaluation_processor import EvaluationProcessor
 from ._mlflow_integration import MLflowIntegration
 from ._result_processor import ResultProcessor
-
 
 
 @experimental
@@ -237,6 +236,8 @@ class RedTeam:
         self.file_manager = create_file_manager(base_output_dir=self.output_dir, logger=self.logger)
 
         self.logger.debug("RedTeam initialized successfully")
+        self._pyrit_memory_initialized = False
+        self._pyrit_memory_path: Optional[str] = None
 
     def _configure_attack_success_thresholds(
         self, attack_success_thresholds: Optional[Dict[RiskCategory, int]]
@@ -1100,20 +1101,23 @@ class RedTeam:
             start_time = time.time()
             tqdm.write(f"▶️ Starting task: {strategy_name} strategy for {risk_category.value} risk category")
 
-            data_file_path = ensure_data_file_path(
+            # Ensure data file path exists
+            data_path = ensure_data_file_path(
                 self.red_team_info,
                 self.scan_output_dir,
                 strategy_name,
                 risk_category,
             )
+
             try:
+                self.logger.debug(f"Calling orchestrator for {strategy_name} strategy")
                 await run_prompt_sending_attack_flow(
                     strategy_name=strategy_name,
                     strategy=strategy,
                     risk_category=risk_category,
                     prompts=all_prompts,
                     timeout=timeout,
-                    data_file_path=data_file_path,
+                    data_file_path=data_path,
                     logger=self.logger,
                     retry_manager=self.retry_manager,
                     prompt_to_context=self.prompt_to_context,
@@ -1124,21 +1128,19 @@ class RedTeam:
                     credential=self.credential,
                     azure_ai_project=self.azure_ai_project,
                     chat_target=self.chat_target,
+                    is_one_dp_project=self._one_dp_project,
                 )
-            except Exception as exc:
-                self.logger.error(
-                    "Error executing FoundryScenario for %s strategy: %s",
-                    strategy_name,
-                    str(exc),
-                )
+            except Exception as e:
+                self.logger.error(f"Error calling orchestrator for {strategy_name} strategy: {str(e)}")
                 self.task_statuses[task_key] = TASK_STATUS["FAILED"]
                 self.failed_tasks += 1
                 async with progress_bar_lock:
                     progress_bar.update(1)
                 return None
 
+            # Write PyRIT outputs to file
             data_path = write_pyrit_outputs_to_file(
-                output_path=self.red_team_info[strategy_name][risk_category.value]["data_file"],
+                output_path=data_path,
                 logger=self.logger,
                 prompt_to_context=self.prompt_to_context,
             )
@@ -1403,6 +1405,8 @@ class RedTeam:
         tqdm.write(f"🚀 STARTING RED TEAM SCAN")
         tqdm.write(f"📂 Output directory: {self.scan_output_dir}")
 
+        self._ensure_pyrit_memory_initialized()
+
     def _setup_logging_filters(self):
         """Setup logging filters to suppress unwanted logs."""
 
@@ -1429,6 +1433,42 @@ class RedTeam:
             for filter in handler.filters:
                 handler.removeFilter(filter)
             handler.addFilter(log_filter)
+
+    def _ensure_pyrit_memory_initialized(self) -> None:
+        """Ensure PyRIT CentralMemory uses a scan-scoped SQLite backend."""
+        if self._pyrit_memory_initialized:
+            return
+
+        base_dir = self.scan_output_dir or self.file_manager.ensure_directory(self.output_dir)
+        os.makedirs(base_dir, exist_ok=True)
+        memory_path = os.path.join(base_dir, "pyrit_memory.sqlite")
+
+        try:
+            existing_memory = CentralMemory.get_memory_instance()
+        except ValueError:
+            existing_memory = None
+
+        if existing_memory:
+            self._pyrit_memory_initialized = True
+            self._pyrit_memory_path = memory_path
+            if self.logger:
+                self.logger.debug(
+                    "PyRIT CentralMemory already initialized with %s", type(existing_memory).__name__
+                )
+            return
+
+        try:
+            sqlite_memory = SQLiteMemory(db_path=memory_path)
+            CentralMemory.set_memory_instance(sqlite_memory)
+        except Exception as exc:
+            if self.logger:
+                self.logger.error("Failed to initialize PyRIT CentralMemory at %s: %s", memory_path, exc)
+            raise
+
+        self._pyrit_memory_initialized = True
+        self._pyrit_memory_path = memory_path
+        if self.logger:
+            self.logger.debug("PyRIT CentralMemory initialized at %s", memory_path)
 
     def _validate_strategies(self, flattened_attack_strategies: List):
         """Validate attack strategies."""

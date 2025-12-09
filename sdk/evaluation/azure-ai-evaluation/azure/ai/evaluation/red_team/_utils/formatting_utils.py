@@ -275,7 +275,7 @@ def write_pyrit_outputs_to_file(
 
     memory_label = {"risk_strategy_path": output_path}
 
-    prompts_request_pieces = memory.get_prompt_request_pieces(labels=memory_label)
+    prompts_request_pieces = memory.get_message_pieces(labels=memory_label)
 
     conversations = [
         [

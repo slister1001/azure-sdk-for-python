@@ -3,18 +3,19 @@
 # ---------------------------------------------------------
 
 import logging
+import json
 from typing import List, Optional
 
 from pyrit.models import MessagePiece, Score, UnvalidatedScore
-from pyrit.score.scorer import Scorer
+from pyrit.score.true_false.true_false_scorer import TrueFalseScorer
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 
 from azure.ai.evaluation.simulator._model_tools._generated_rai_client import GeneratedRAIClient
-from ._rai_service_eval_chat_target import RAIServiceEvalChatTarget
+from ._rai_service_evaluation_target import AzureRAIEvaluationTarget
 from .._attack_objective_generator import RiskCategory
 
 
-class AzureRAIServiceTrueFalseScorer(Scorer):
+class AzureRAIServiceTrueFalseScorer(TrueFalseScorer):
     """Scorer for Azure RAI service.
 
     This class extends the PyRIT Scorer class to support scoring prompts using
@@ -49,49 +50,57 @@ class AzureRAIServiceTrueFalseScorer(Scorer):
         :param prompt_template_key: Optional prompt template key to use
         :param logger: Optional logger to use
         """
+        self.logger = logger or logging.getLogger(__name__)
+        self.context = context
+
+        # Use AzureRAIEvaluationTarget for scoring
+        self._scoring_target = AzureRAIEvaluationTarget(
+            client=client,
+            risk_category=risk_category,
+            logger=self.logger,
+        )
+        
         validator = validator or ScorerPromptValidator(
             supported_data_types=("text",),
             supported_roles=("assistant",),
             max_pieces_in_response=1,
         )
+        
         super().__init__(validator=validator)
-        self._client = client
-        self._api_version = api_version
-        self._model = model
-        self._prompt_template_key = prompt_template_key
-        self.logger = logger or logging.getLogger(__name__)
-        self.context = context
-
-        # Use AzureRAIServiceTarget for scoring as well
-        self._scoring_target_red_llm = RAIServiceEvalChatTarget(
-            logger=self.logger,
-            credential=credential,
-            azure_ai_project=azure_ai_project,
-            risk_category=risk_category,
-            context=context,
-        )
 
     async def _score_piece_async(
         self, message_piece: MessagePiece, *, objective: Optional[str] = None
     ) -> List[Score]:
         """Score a single message piece using the Azure RAI service."""
         self.logger.info("Starting to score prompt response")
+        
+        value_to_score = message_piece.converted_value
+        
+        # Check if value is CrescendoResponse JSON and extract generated_question
+        try:
+            if isinstance(value_to_score, str) and "generated_question" in value_to_score:
+                parsed = json.loads(value_to_score)
+                if "generated_question" in parsed:
+                    value_to_score = parsed["generated_question"]
+                    self.logger.info(f"Extracted generated_question from CrescendoResponse for scoring: {value_to_score}")
+        except Exception as e:
+            self.logger.warning(f"Failed to parse potential CrescendoResponse: {e}")
 
-        if not self._scoring_target_red_llm.context:
-            self._scoring_target_red_llm.context = message_piece.labels.get("context", "")
+        # Ensure context is available in message piece labels if not already
+        if self.context and "context" not in message_piece.labels:
+            message_piece.labels["context"] = self.context
 
         derived_objective = objective or message_piece.labels.get("objective")
 
         unvalidated_score: UnvalidatedScore = await self._score_value_with_llm(
-            prompt_target=self._scoring_target_red_llm,
+            prompt_target=self._scoring_target,
             system_prompt="Please evaluate the following response.",
-            message_value=message_piece.converted_value,
+            message_value=value_to_score,
             message_data_type=message_piece.converted_value_data_type,
             scored_prompt_id=str(message_piece.id),
             objective=derived_objective,
             attack_identifier=message_piece.attack_identifier or None,
         )
-
         score = unvalidated_score.to_score(
             score_value=unvalidated_score.raw_score_value,
             score_type=self.scorer_type,
@@ -99,10 +108,4 @@ class AzureRAIServiceTrueFalseScorer(Scorer):
 
         return [score]
 
-    def validate_return_scores(self, scores: List[Score]):
-        """Ensure returned scores align with the expected scorer type."""
-        for score in scores:
-            if score.score_type != self.scorer_type:
-                raise ValueError(
-                    f"Score type {score.score_type} does not match expected {self.scorer_type} for {self.__class__.__name__}."
-                )
+

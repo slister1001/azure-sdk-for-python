@@ -7,10 +7,12 @@ import asyncio
 import logging
 import os
 import uuid
+import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
 import tenacity
+from pyrit.score import TrueFalseScorer
 
 from azure.ai.evaluation.simulator._model_tools._generated_rai_client import GeneratedRAIClient
 from pyrit.executor.attack import AttackScoringConfig
@@ -22,6 +24,7 @@ from ._attack_objective_generator import RiskCategory
 from ._attack_strategy import AttackStrategy
 from ._strategy_mapping import map_to_foundry_strategy, requires_custom_handling
 from ._utils._rai_service_true_false_scorer import AzureRAIServiceTrueFalseScorer
+from ._utils._rai_service_target import AzureRAIServiceTarget
 from ._utils.constants import DATA_EXT, TASK_STATUS
 from ._utils.retry_utils import RetryManager
 
@@ -100,6 +103,7 @@ async def run_prompt_sending_attack_flow(
     credential: Any,
     azure_ai_project: Any,
     chat_target: PromptChatTarget,
+    is_one_dp_project: bool,
 ) -> None:
     """Execute attacks using PyRIT's FoundryScenario with one AtomicAttack per prompt.
 
@@ -123,6 +127,7 @@ async def run_prompt_sending_attack_flow(
     :param credential: Credential to authorize scoring requests
     :param azure_ai_project: Azure AI project scope metadata
     :param chat_target: PyRIT target for objective execution
+    :param is_one_dp_project: Whether this is a OneDP project
     """
 
     if not prompts:
@@ -149,7 +154,7 @@ async def run_prompt_sending_attack_flow(
             foundry_strat = map_to_foundry_strategy(strat)
             if foundry_strat:
                 mapped_strategies.append(foundry_strat)
-    
+
     if not mapped_strategies:
         logger.error("No valid FoundryStrategy mapping found for %s", strategy_name)
         return
@@ -189,17 +194,38 @@ async def run_prompt_sending_attack_flow(
         if risk_sub_type:
             memory_labels["risk_sub_type"] = risk_sub_type
 
+        # Configure adversarial chat (attacker)
+        prompt_template_key = "orchestrators/red_teaming/text_generation.yaml"
+        crescendo_format = False
+
+        if any(s == AttackStrategy.Crescendo for s in strategies):
+            prompt_template_key = "orchestrators/crescendo/crescendo_variant_1.yaml"
+            crescendo_format = True
+
+        adversarial_chat = AzureRAIServiceTarget(
+            client=rai_client,
+            api_version=None,
+            model="gpt-4",
+            prompt_template_key=prompt_template_key,
+            objective=prompt,
+            logger=logger,
+            crescendo_format=crescendo_format,
+            is_one_dp_project=is_one_dp_project,
+        )
+
         # Create a scenario with a single objective for this prompt
         scenario = FoundryScenario(
-            objective_target=chat_target,
+            adversarial_chat=adversarial_chat,
+            objectives=[prompt],
             objective_scorer=objective_scorer,
+            include_baseline=False
         )
 
         async def _execute_scenario() -> None:
             """Execute the scenario with timeout and proper initialization."""
             await scenario.initialize_async(
+                objective_target=chat_target,
                 scenario_strategies=mapped_strategies,
-                objectives=[prompt],
                 memory_labels=memory_labels,
             )
             
@@ -248,11 +274,12 @@ async def run_prompt_sending_attack_flow(
             continue
         except Exception as exc:  # pylint: disable=broad-except
             logger.error(
-                "Error processing prompt %d for %s/%s: %s",
+                "Error processing prompt %d for %s/%s: %s\n%s",
                 prompt_idx + 1,
                 strategy_name,
                 risk_category.value,
                 str(exc),
+                traceback.format_exc(),
             )
             red_team_info[strategy_name][risk_category.value]["status"] = TASK_STATUS["INCOMPLETE"]
             continue
