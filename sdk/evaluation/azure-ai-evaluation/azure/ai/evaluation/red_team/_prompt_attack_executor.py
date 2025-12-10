@@ -24,9 +24,11 @@ from ._attack_objective_generator import RiskCategory
 from ._attack_strategy import AttackStrategy
 from ._strategy_mapping import map_to_foundry_strategy, requires_custom_handling
 from ._utils._rai_service_true_false_scorer import AzureRAIServiceTrueFalseScorer
-from ._utils._rai_service_target import AzureRAIServiceTarget
+from ._utils._rai_service_simulation_target import AzureRAISimulationTarget
+from ._utils._rai_service_evaluation_target import AzureRAIEvaluationTarget
 from ._utils.constants import DATA_EXT, TASK_STATUS
 from ._utils.retry_utils import RetryManager
+from pyrit.score import SelfAskRefusalScorer
 
 
 def ensure_data_file_path(
@@ -83,6 +85,30 @@ def _normalize_context_for_prompt(prompt: str, prompt_to_context: Optional[Dict[
             return {"contexts": contexts}
 
     return {"contexts": []}
+
+
+def _get_prompt_template_key_for_strategy(strategy: Union[AttackStrategy, List[AttackStrategy]]) -> str:
+    """Get the prompt template key for the given attack strategy.
+    
+    :param strategy: AttackStrategy or list of strategies
+    :return: The prompt template key string
+    """
+    strategies = [strategy] if isinstance(strategy, AttackStrategy) else strategy
+    
+    # Check for Crescendo first (highest priority)
+    if any(s == AttackStrategy.Crescendo for s in strategies):
+        return "orchestrators/crescendo/crescendo_variant_1.yaml"
+    
+    # Check for Tense
+    if any(s == AttackStrategy.Tense for s in strategies):
+        return "prompt_converters/tense_converter.yaml"
+    
+    # Check for MultiTurn
+    if any(s == AttackStrategy.MultiTurn for s in strategies):
+        return "orchestrators/red_teaming/text_generation.yaml"
+    
+    # Default to red teaming template
+    return "orchestrators/red_teaming/text_generation.yaml"
 
 
 async def run_prompt_sending_attack_flow(
@@ -194,30 +220,44 @@ async def run_prompt_sending_attack_flow(
         if risk_sub_type:
             memory_labels["risk_sub_type"] = risk_sub_type
 
-        # Configure adversarial chat (attacker)
-        prompt_template_key = "orchestrators/red_teaming/text_generation.yaml"
-        crescendo_format = False
+        # Get the appropriate prompt template key for the strategy
+        prompt_template_key = _get_prompt_template_key_for_strategy(strategy)
 
-        if any(s == AttackStrategy.Crescendo for s in strategies):
-            prompt_template_key = "orchestrators/crescendo/crescendo_variant_1.yaml"
-            crescendo_format = True
+        # Check if Tense strategy is being used
+        strategies = [strategy] if isinstance(strategy, AttackStrategy) else strategy
+        is_tense_strategy = any(s == AttackStrategy.Tense for s in strategies)
 
-        adversarial_chat = AzureRAIServiceTarget(
+        # Create adversarial chat target for simulation
+        adversarial_chat_kwargs = {
+            "client": rai_client,
+            "api_version": None,
+            "model": "gpt-4",
+            "prompt_template_key": prompt_template_key,
+            "objective": prompt,
+            "logger": logger,
+            "is_one_dp_project": is_one_dp_project,
+        }
+        if is_tense_strategy:
+            adversarial_chat_kwargs["tense"] = "past"
+        
+        adversarial_chat = AzureRAISimulationTarget(**adversarial_chat_kwargs)
+
+        # Create evaluation target for refusal scoring
+        evaluation_target = AzureRAIEvaluationTarget(
             client=rai_client,
-            api_version=None,
-            model="gpt-4",
-            prompt_template_key=prompt_template_key,
-            objective=prompt,
+            risk_category=risk_category,
             logger=logger,
-            crescendo_format=crescendo_format,
-            is_one_dp_project=is_one_dp_project,
         )
+
+        # Create a custom refusal scorer that uses the RAI evaluation target
+        refusal_scorer = SelfAskRefusalScorer(chat_target=evaluation_target)
 
         # Create a scenario with a single objective for this prompt
         scenario = FoundryScenario(
             adversarial_chat=adversarial_chat,
             objectives=[prompt],
             objective_scorer=objective_scorer,
+            refusal_scorer=refusal_scorer,
             include_baseline=False
         )
 
@@ -289,4 +329,5 @@ __all__ = [
     "ensure_data_file_path",
     "calculate_prompt_timeout",
     "run_prompt_sending_attack_flow",
+    "_get_prompt_template_key_for_strategy",
 ]

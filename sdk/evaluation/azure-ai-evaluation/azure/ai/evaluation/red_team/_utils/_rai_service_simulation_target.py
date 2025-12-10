@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field, ValidationError
 
 from azure.ai.evaluation.simulator._model_tools._generated_rai_client import GeneratedRAIClient
 from pyrit.models import Message, construct_response_from_request
-from pyrit.prompt_target import PromptChatTarget
 from pyrit.exceptions import remove_markdown_json
 
 logger = logging.getLogger(__name__)
@@ -60,7 +59,11 @@ def _fallback_response(retry_state: RetryCallState):
     return [response_entry]
 
 
-class AzureRAISimulationTarget(PromptChatTarget):
+# Import at the end to avoid circular imports
+from ._rai_service_target import AzureRAIServiceTarget
+
+
+class AzureRAISimulationTarget(AzureRAIServiceTarget):
     """Target for Azure RAI service simulation (chat)."""
 
     def __init__(
@@ -83,14 +86,15 @@ class AzureRAISimulationTarget(PromptChatTarget):
         :param model: The model to use
         :param objective: The objective of the target
         """
-        PromptChatTarget.__init__(self)
-        self._client = client
-        self._api_version = api_version
-        self._model = model
-        self.objective = objective
+        super().__init__(
+            client=client,
+            api_version=api_version,
+            model=model,
+            objective=objective,
+            logger=logger,
+        )
         self.tense = tense
         self.prompt_template_key = prompt_template_key
-        self.logger = logger or logging.getLogger(__name__)
         self.crescendo_format = crescendo_format
         self.is_one_dp_project = is_one_dp_project
 
@@ -396,7 +400,6 @@ class AzureRAISimulationTarget(PromptChatTarget):
         :return: The extracted content as a dictionary
         """
         self.logger.debug(f"Processing response type: {type(response).__name__}")
-
         # Handle string responses
         if isinstance(response, str):
             parsed = self._extract_json_from_content(response)

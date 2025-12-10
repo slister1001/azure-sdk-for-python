@@ -9,26 +9,16 @@ from azure.ai.evaluation.simulator._model_tools._generated_rai_client import Gen
 from .._attack_objective_generator import RiskCategory
 from pyrit.models import Message
 
-from ._rai_service_simulation_target import AzureRAISimulationTarget, CrescendoResponse
 from ._rai_service_evaluation_target import AzureRAIEvaluationTarget
+from pyrit.prompt_target import PromptChatTarget
 
 logger = logging.getLogger(__name__)
 
 
-
-
-
-
-
-
-
-
-
-class AzureRAIServiceTarget(AzureRAISimulationTarget):
-    """Target for Azure RAI service.
+class AzureRAIServiceTarget(PromptChatTarget):
+    """Base target for Azure RAI service.
     
-    This class is a wrapper that supports both simulation (chat) and evaluation (scoring)
-    for backward compatibility.
+    This class provides the base functionality for Azure RAI service targets.
     """
 
     def __init__(
@@ -38,12 +28,7 @@ class AzureRAIServiceTarget(AzureRAISimulationTarget):
         api_version: Optional[str] = None,
         model: Optional[str] = None,
         objective: Optional[str] = None,
-        tense: Optional[str] = None,
-        prompt_template_key: Optional[str] = None,
         logger: Optional[logging.Logger] = None,
-        crescendo_format: bool = False,
-        is_one_dp_project: bool = False,
-        risk_category: Optional[RiskCategory] = None,
     ) -> None:
         """Initialize the target.
 
@@ -51,26 +36,14 @@ class AzureRAIServiceTarget(AzureRAISimulationTarget):
         :param api_version: The API version to use
         :param model: The model to use
         :param objective: The objective of the target
+        :param logger: The logger to use
         """
-        super().__init__(
-            client=client,
-            api_version=api_version,
-            model=model,
-            objective=objective,
-            tense=tense,
-            prompt_template_key=prompt_template_key,
-            logger=logger,
-            crescendo_format=crescendo_format,
-            is_one_dp_project=is_one_dp_project,
-        )
-        self.risk_category = risk_category
-        self._evaluation_target = None
-        if risk_category:
-            self._evaluation_target = AzureRAIEvaluationTarget(
-                client=client,
-                risk_category=risk_category,
-                logger=logger,
-            )
+        PromptChatTarget.__init__(self)
+        self._client = client
+        self._api_version = api_version
+        self._model = model
+        self.objective = objective
+        self.logger = logger or logging.getLogger(__name__)
 
     async def send_prompt_async(
         self, *, message: Message, objective: str = ""
@@ -81,7 +54,11 @@ class AzureRAIServiceTarget(AzureRAISimulationTarget):
         :param objective: Optional objective to use for this specific request
         :return: The response
         """
-        if self.risk_category and self._evaluation_target:
-            return await self._evaluation_target.send_prompt_async(message=message)
-        
-        return await super().send_prompt_async(message=message, objective=objective)
+        raise NotImplementedError("Subclasses must implement send_prompt_async")
+
+    def is_json_response_supported(self) -> bool:
+        """Check if JSON response is supported.
+
+        :return: True if JSON response is supported, False otherwise
+        """
+        return True
