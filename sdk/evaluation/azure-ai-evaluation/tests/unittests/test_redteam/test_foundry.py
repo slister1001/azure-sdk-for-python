@@ -2816,3 +2816,210 @@ class TestFoundryFlowIntegration:
             # The test passes if no exceptions are raised during setup
             assert manager.output_dir == str(tmp_path)
             assert manager.credential == mock_credential
+
+
+# =============================================================================
+# Regression Tests for ASR Scoring Error Fix
+# =============================================================================
+# These tests guard against regression of the bug where scoring errors
+# artificially lowered ASR by being counted as FAILURE instead of UNDETERMINED.
+# See: https://github.com/Azure/azure-sdk-for-python/pull/44551
+@pytest.mark.unittest
+class TestASRScoringErrorRegression:
+    """Regression tests ensuring scoring errors don't artificially lower ASR.
+
+    The original bug: RAIServiceScorer._score_piece_async() caught exceptions
+    and returned score_value="false". PyRIT mapped "false" to AttackOutcome.FAILURE.
+    ASR calculation used total results as denominator, so scoring errors
+    inflated the denominator and lowered ASR.
+
+    The fix: (1) re-raise scorer exceptions so PyRIT treats them as UNDETERMINED,
+    (2) exclude UNDETERMINED from the ASR denominator.
+    """
+
+    @pytest.mark.asyncio
+    async def test_scorer_error_does_not_return_false_score(self):
+        """Regression: scorer errors must not produce a score_value='false'.
+
+        The original bug returned Score(score_value="false") on error, which
+        PyRIT interpreted as a genuine attack failure, lowering ASR.
+        """
+        scorer = RAIServiceScorer(
+            credential=MagicMock(),
+            azure_ai_project={
+                "subscription_id": "sub",
+                "resource_group_name": "rg",
+                "project_name": "proj",
+            },
+            risk_category=RiskCategory.Violence,
+            logger=MagicMock(),
+        )
+
+        mock_piece = MagicMock()
+        mock_piece.id = "test-id"
+        mock_piece.converted_value = "Test response"
+        mock_piece.original_value = "Original content"
+        mock_piece.labels = {}
+        mock_piece.api_role = "assistant"
+
+        mock_message = MagicMock()
+        mock_message.message_pieces = [mock_piece]
+
+        with patch(
+            "azure.ai.evaluation.red_team._foundry._rai_scorer.evaluate_with_rai_service",
+            new_callable=AsyncMock,
+        ) as mock_eval:
+            mock_eval.side_effect = Exception("Service unavailable")
+
+            # Must raise — NOT return a list of scores with score_value="false"
+            with pytest.raises(Exception, match="Service unavailable"):
+                await scorer.score_async(mock_message, objective="Test attack")
+
+    def test_calculate_asr_all_undetermined(self):
+        """Regression: all-UNDETERMINED results must give ASR 0.0, not divide-by-zero."""
+        from pyrit.models.attack_result import AttackOutcome
+
+        orchestrator = ScenarioOrchestrator(
+            risk_category="violence",
+            objective_target=MagicMock(),
+            rai_scorer=MagicMock(),
+            logger=MagicMock(),
+        )
+
+        undetermined = MagicMock()
+        undetermined.outcome = AttackOutcome.UNDETERMINED
+
+        orchestrator._scenario_result = MagicMock()
+        orchestrator._scenario_result.attack_results = {
+            "obj1": [undetermined, undetermined, undetermined]
+        }
+
+        asr = orchestrator.calculate_asr()
+        assert asr == 0.0
+
+    def test_calculate_asr_undetermined_not_in_denominator(self):
+        """Regression: UNDETERMINED must not inflate denominator.
+
+        With 1 SUCCESS, 1 FAILURE, 8 UNDETERMINED:
+        - Correct ASR: 1 / (1+1) = 0.5  (UNDETERMINED excluded)
+        - Old buggy ASR: 1 / 10 = 0.1  (UNDETERMINED counted as denominator)
+        """
+        from pyrit.models.attack_result import AttackOutcome
+
+        orchestrator = ScenarioOrchestrator(
+            risk_category="violence",
+            objective_target=MagicMock(),
+            rai_scorer=MagicMock(),
+            logger=MagicMock(),
+        )
+
+        success = MagicMock()
+        success.outcome = AttackOutcome.SUCCESS
+
+        failure = MagicMock()
+        failure.outcome = AttackOutcome.FAILURE
+
+        undetermined = MagicMock()
+        undetermined.outcome = AttackOutcome.UNDETERMINED
+
+        orchestrator._scenario_result = MagicMock()
+        orchestrator._scenario_result.attack_results = {
+            "obj1": [success, failure] + [undetermined] * 8
+        }
+
+        asr = orchestrator.calculate_asr()
+        # Must be 0.5 (1/2), NOT 0.1 (1/10)
+        assert asr == pytest.approx(0.5)
+
+    def test_calculate_asr_by_strategy_excludes_undetermined(self):
+        """Regression: per-strategy ASR must exclude UNDETERMINED from denominator."""
+        from pyrit.models.attack_result import AttackOutcome
+
+        orchestrator = ScenarioOrchestrator(
+            risk_category="violence",
+            objective_target=MagicMock(),
+            rai_scorer=MagicMock(),
+            logger=MagicMock(),
+        )
+
+        success = MagicMock()
+        success.outcome = AttackOutcome.SUCCESS
+        success.attack_identifier = {"__type__": "Base64Attack"}
+
+        undetermined = MagicMock()
+        undetermined.outcome = AttackOutcome.UNDETERMINED
+        undetermined.attack_identifier = {"__type__": "Base64Attack"}
+
+        orchestrator._scenario_result = MagicMock()
+        orchestrator._scenario_result.attack_results = {
+            "obj1": [success] + [undetermined] * 4
+        }
+
+        asr_by_strategy = orchestrator.calculate_asr_by_strategy()
+
+        # 1 success / 1 decided = 1.0, NOT 1/5 = 0.2
+        assert asr_by_strategy["Base64Attack"] == pytest.approx(1.0)
+
+    def test_summary_stats_asr_excludes_undetermined(self):
+        """Regression: get_summary_stats() ASR must exclude UNDETERMINED."""
+        from pyrit.models.attack_result import AttackOutcome
+
+        mock_scenario = MagicMock()
+
+        success = MagicMock()
+        success.outcome = AttackOutcome.SUCCESS
+
+        undetermined = MagicMock()
+        undetermined.outcome = AttackOutcome.UNDETERMINED
+
+        mock_scenario.get_attack_results.return_value = [
+            success,
+        ] + [undetermined] * 9
+
+        mock_dataset = MagicMock()
+        mock_dataset.get_all_seed_groups.return_value = []
+
+        processor = FoundryResultProcessor(
+            scenario=mock_scenario,
+            dataset_config=mock_dataset,
+            risk_category="violence",
+        )
+
+        stats = processor.get_summary_stats()
+
+        assert stats["total"] == 10
+        assert stats["successful"] == 1
+        assert stats["undetermined"] == 9
+        # ASR should be 1/1 = 1.0 (only decided results), NOT 1/10 = 0.1
+        assert stats["asr"] == pytest.approx(1.0)
+
+    def test_summary_stats_all_undetermined(self):
+        """Regression: all-UNDETERMINED in summary stats must give ASR 0.0."""
+        from pyrit.models.attack_result import AttackOutcome
+
+        mock_scenario = MagicMock()
+
+        undetermined = MagicMock()
+        undetermined.outcome = AttackOutcome.UNDETERMINED
+
+        mock_scenario.get_attack_results.return_value = [
+            undetermined,
+            undetermined,
+        ]
+
+        mock_dataset = MagicMock()
+        mock_dataset.get_all_seed_groups.return_value = []
+
+        processor = FoundryResultProcessor(
+            scenario=mock_scenario,
+            dataset_config=mock_dataset,
+            risk_category="violence",
+        )
+
+        stats = processor.get_summary_stats()
+
+        assert stats["total"] == 2
+        assert stats["successful"] == 0
+        assert stats["failed"] == 0
+        assert stats["undetermined"] == 2
+        assert stats["asr"] == 0.0
