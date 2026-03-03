@@ -15,6 +15,7 @@ from azure.ai.evaluation.red_team._utils.strategy_utils import (
     strategy_converter_map,
     get_converter_for_strategy,
     get_chat_target,
+    PYRIT_HTTP_TIMEOUT,
 )
 from azure.ai.evaluation.red_team._attack_strategy import AttackStrategy
 from azure.ai.evaluation.red_team._callback_chat_target import _CallbackChatTarget
@@ -117,6 +118,7 @@ class TestChatTargetFunctions:
             model_name="gpt-35-turbo",
             endpoint="https://example.openai.azure.com",
             api_key="test-api-key",
+            httpx_client_kwargs={"timeout": PYRIT_HTTP_TIMEOUT},
         )
 
     @patch("pyrit.auth.get_azure_openai_auth")
@@ -140,6 +142,7 @@ class TestChatTargetFunctions:
             model_name="gpt-35-turbo",
             endpoint="https://example.openai.azure.com",
             api_key=mock_auth_result,
+            httpx_client_kwargs={"timeout": PYRIT_HTTP_TIMEOUT},
         )
         assert result == mock_instance
 
@@ -226,6 +229,7 @@ class TestChatTargetFunctions:
             model_name="gpt-35-turbo",
             endpoint="https://example.openai.azure.com",
             api_key="test-api-key",
+            httpx_client_kwargs={"timeout": PYRIT_HTTP_TIMEOUT},
         )
         # Credential should not be used
         mock_credential.get_token.assert_not_called()
@@ -289,6 +293,7 @@ class TestChatTargetFunctions:
             model_name="gpt-4",
             endpoint=None,
             api_key="test-api-key",
+            httpx_client_kwargs={"timeout": PYRIT_HTTP_TIMEOUT},
         )
 
         # Test with base_url
@@ -306,6 +311,7 @@ class TestChatTargetFunctions:
             model_name="gpt-4",
             endpoint="https://example.com/api",
             api_key="test-api-key",
+            httpx_client_kwargs={"timeout": PYRIT_HTTP_TIMEOUT},
         )
 
     @patch("azure.ai.evaluation.red_team._utils.strategy_utils._CallbackChatTarget")
@@ -390,3 +396,77 @@ class TestChatTargetFunctions:
 
         # Verify we get a callback target
         assert isinstance(result, _CallbackChatTarget)
+
+
+@pytest.mark.unittest
+class TestHttpxTimeoutConfiguration:
+    """Test that all OpenAIChatTarget calls include the httpx timeout configuration.
+
+    This verifies the fix for premature ReadTimeout errors during red team scans
+    with slow model responses. All 4 code paths that create OpenAIChatTarget must
+    pass httpx_client_kwargs={"timeout": PYRIT_HTTP_TIMEOUT}.
+    """
+
+    def test_pyrit_http_timeout_value(self):
+        """Verify the PYRIT_HTTP_TIMEOUT constant is set to 180 seconds."""
+        assert PYRIT_HTTP_TIMEOUT == 180
+
+    @patch("azure.ai.evaluation.red_team._utils.strategy_utils.OpenAIChatTarget")
+    def test_httpx_timeout_azure_openai_with_api_key(self, mock_openai_chat_target):
+        """Verify httpx timeout is set when using Azure OpenAI with API key auth."""
+        mock_openai_chat_target.return_value = MagicMock()
+
+        config = {
+            "azure_deployment": "gpt-4",
+            "azure_endpoint": "https://example.openai.azure.com",
+            "api_key": "test-key",
+        }
+        get_chat_target(config)
+
+        call_kwargs = mock_openai_chat_target.call_args[1]
+        assert "httpx_client_kwargs" in call_kwargs
+        assert call_kwargs["httpx_client_kwargs"] == {"timeout": PYRIT_HTTP_TIMEOUT}
+
+    @patch("azure.ai.evaluation.red_team._utils.strategy_utils.OpenAIChatTarget")
+    def test_httpx_timeout_azure_openai_with_credential(self, mock_openai_chat_target):
+        """Verify httpx timeout is set when using Azure OpenAI with TokenCredential auth."""
+        mock_openai_chat_target.return_value = MagicMock()
+        mock_credential = MagicMock()
+        mock_credential.get_token.return_value = MagicMock(token="tok")
+
+        config = {
+            "azure_deployment": "gpt-4",
+            "azure_endpoint": "https://example.openai.azure.com",
+            "credential": mock_credential,
+        }
+        get_chat_target(config)
+
+        call_kwargs = mock_openai_chat_target.call_args[1]
+        assert call_kwargs["httpx_client_kwargs"] == {"timeout": PYRIT_HTTP_TIMEOUT}
+
+    @patch("pyrit.auth.get_azure_openai_auth")
+    @patch("azure.ai.evaluation.red_team._utils.strategy_utils.OpenAIChatTarget")
+    def test_httpx_timeout_azure_openai_keyless(self, mock_openai_chat_target, mock_get_auth):
+        """Verify httpx timeout is set when using Azure OpenAI with DefaultAzureCredential."""
+        mock_openai_chat_target.return_value = MagicMock()
+        mock_get_auth.return_value = MagicMock()
+
+        config = {
+            "azure_deployment": "gpt-4",
+            "azure_endpoint": "https://example.openai.azure.com",
+        }
+        get_chat_target(config)
+
+        call_kwargs = mock_openai_chat_target.call_args[1]
+        assert call_kwargs["httpx_client_kwargs"] == {"timeout": PYRIT_HTTP_TIMEOUT}
+
+    @patch("azure.ai.evaluation.red_team._utils.strategy_utils.OpenAIChatTarget")
+    def test_httpx_timeout_openai(self, mock_openai_chat_target):
+        """Verify httpx timeout is set when using plain OpenAI config."""
+        mock_openai_chat_target.return_value = MagicMock()
+
+        config = {"model": "gpt-4", "api_key": "test-key"}
+        get_chat_target(config)
+
+        call_kwargs = mock_openai_chat_target.call_args[1]
+        assert call_kwargs["httpx_client_kwargs"] == {"timeout": PYRIT_HTTP_TIMEOUT}
