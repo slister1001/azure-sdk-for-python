@@ -3,7 +3,7 @@
 ## 1.16.0 (Unreleased)
 
 ### Bugs Fixed
-- Fixed `NotFoundError: 404` when using `model_config` dict target with Foundry-style endpoints (`*.services.ai.azure.com`) by appending `/openai/v1` to the endpoint URL for PyRIT compatibility.
+- Fixed `UnicodeDecodeError` on Windows when reading red team JSONL files containing non-ASCII characters (UnicodeConfusable strategy, CJK languages) by adding explicit `encoding="utf-8"` to all file open calls in the result processing path.
 - Fixed Foundry red team double-evaluation that caused ~3x scan latency by removing redundant evaluation_processor.evaluate() call.
 - Fixed lost red team attack details where baseline overwrites wiped evaluation results.
 - Fixed incorrect per_testing_criteria that showed attack strategies alongside risk categories.
